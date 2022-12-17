@@ -200,10 +200,7 @@ impl SendParam for [u8] {
     }
 }
 
-impl<A> SendParam for arrayvec::ArrayVec<A>
-where
-    A: arrayvec::Array<Item = u8>,
-{
+impl<const CAP: usize> SendParam for arrayvec::ArrayVec<u8, CAP> {
     fn len(&self) -> usize {
         self.len()
     }
@@ -234,10 +231,7 @@ impl RecvParam for &mut [u8] {
     }
 }
 
-impl<A> RecvParam for arrayvec::ArrayVec<A>
-where
-    A: arrayvec::Array<Item = u8>,
-{
+impl<const CAP: usize> RecvParam for arrayvec::ArrayVec<u8, CAP> {
     fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
     where
         S: embedded_hal::spi::FullDuplex<u8>,

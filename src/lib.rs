@@ -27,7 +27,7 @@ pub struct Wifi<T> {
 pub struct Client<T> {
     socket: types::Socket,
     buffer_offset: usize,
-    buffer: arrayvec::ArrayVec<[u8; BUFFER_CAPACITY]>,
+    buffer: arrayvec::ArrayVec<u8, BUFFER_CAPACITY>,
     phantom: marker::PhantomData<T>,
 }
 
@@ -43,7 +43,7 @@ where
 
     pub fn get_firmware_version(
         &mut self,
-    ) -> Result<arrayvec::ArrayVec<[u8; 16]>, error::Error<T::Error>> {
+    ) -> Result<arrayvec::ArrayVec<u8, 16>, error::Error<T::Error>> {
         self.handler.get_firmware_version()
     }
 
@@ -141,11 +141,11 @@ where
             }))
     }
 
-    pub fn ssid(&mut self) -> Result<arrayvec::ArrayVec<[u8; 32]>, error::Error<T::Error>> {
+    pub fn ssid(&mut self) -> Result<arrayvec::ArrayVec<u8, 32>, error::Error<T::Error>> {
         self.handler.get_current_ssid()
     }
 
-    pub fn bssid(&mut self) -> Result<arrayvec::ArrayVec<[u8; 6]>, error::Error<T::Error>> {
+    pub fn bssid(&mut self) -> Result<arrayvec::ArrayVec<u8, 6>, error::Error<T::Error>> {
         self.handler.get_current_bssid()
     }
 

@@ -305,10 +305,9 @@ where
     }
 }
 
-impl<A> SendParams for arrayvec::ArrayVec<A>
+impl<T, const CAP: usize> SendParams for arrayvec::ArrayVec<T, CAP>
 where
-    A: arrayvec::Array,
-    A::Item: param::SendParam,
+    T: param::SendParam,
 {
     fn param_len(&self, long: bool) -> usize {
         self.iter().map(|p| p.len_length_delimited(long)).sum()
@@ -330,10 +329,9 @@ where
     }
 }
 
-impl<A> RecvParams for arrayvec::ArrayVec<A>
+impl<T, const CAP: usize> RecvParams for arrayvec::ArrayVec<T, CAP>
 where
-    A: arrayvec::Array,
-    A::Item: param::RecvParam + Default,
+    T: param::RecvParam + Default,
 {
     fn recv<S>(&mut self, spi: &mut S, long: bool) -> Result<(), S::Error>
     where
@@ -344,7 +342,7 @@ where
         let len = spi.recv_exchange()?;
         for i in 0..len {
             log::trace!("param {}", i);
-            let mut item: <A as arrayvec::Array>::Item = Default::default();
+            let mut item: T = Default::default();
             item.recv_length_delimited(spi, long)?;
             self.push(item);
         }

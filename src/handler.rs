@@ -46,7 +46,7 @@ where
 
     pub fn get_firmware_version(
         &mut self,
-    ) -> Result<arrayvec::ArrayVec<[u8; 16]>, error::Error<T::Error>> {
+    ) -> Result<arrayvec::ArrayVec<u8, 16>, error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (param::NullTerminated::new(arrayvec::ArrayVec::new()),);
 
@@ -90,9 +90,8 @@ where
 
     pub fn get_scanned_networks(
         &mut self,
-    ) -> Result<arrayvec::ArrayVec<[arrayvec::ArrayVec<[u8; 32]>; 16]>, error::Error<T::Error>>
-    {
-        let mut recv_params: arrayvec::ArrayVec<[arrayvec::ArrayVec<[u8; 32]>; 16]> =
+    ) -> Result<arrayvec::ArrayVec<arrayvec::ArrayVec<u8, 32>, 16>, error::Error<T::Error>> {
+        let mut recv_params: arrayvec::ArrayVec<arrayvec::ArrayVec<u8, 32>, 16> =
             arrayvec::ArrayVec::new();
 
         self.handle_cmd(command::Command::ScanNetworks, &(), &mut recv_params)?;
@@ -409,7 +408,7 @@ where
 
     pub fn get_current_ssid(
         &mut self,
-    ) -> Result<arrayvec::ArrayVec<[u8; 32]>, error::Error<T::Error>> {
+    ) -> Result<arrayvec::ArrayVec<u8, 32>, error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (arrayvec::ArrayVec::new(),);
 
@@ -426,7 +425,7 @@ where
 
     pub fn get_current_bssid(
         &mut self,
-    ) -> Result<arrayvec::ArrayVec<[u8; 6]>, error::Error<T::Error>> {
+    ) -> Result<arrayvec::ArrayVec<u8, 6>, error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (arrayvec::ArrayVec::new(),);
 
