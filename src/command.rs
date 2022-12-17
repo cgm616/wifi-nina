@@ -1,4 +1,6 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive,
+)]
 #[repr(u8)]
 pub enum Command {
     SetNetCmd = 0x10,
