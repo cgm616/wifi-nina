@@ -8,12 +8,15 @@ mod encoding;
 mod error;
 mod full_duplex;
 mod handler;
+pub mod nal;
 mod param;
 mod params;
 pub mod transport;
 pub mod types;
 
 pub use error::Error;
+
+use embedded_nal::Ipv4Addr;
 
 const BUFFER_CAPACITY: usize = 4096;
 
@@ -109,7 +112,7 @@ where
             }
         }
 
-        Err(error::Error::ConnectionFailure(actual_connection_state))
+        Err(error::TcpError::ConnectionFailure(actual_connection_state).into())
     }
 
     pub fn scan_networks<'a>(
@@ -157,10 +160,7 @@ where
         self.handler.get_current_encryption_type()
     }
 
-    pub fn resolve(
-        &mut self,
-        hostname: &str,
-    ) -> Result<no_std_net::Ipv4Addr, error::Error<T::Error>> {
+    pub fn resolve(&mut self, hostname: &str) -> Result<Ipv4Addr, error::Error<T::Error>> {
         self.handler.request_host_by_name(hostname)?;
         self.handler.get_host_by_name()
     }
@@ -186,7 +186,7 @@ where
     pub fn connect_ipv4(
         &mut self,
         wifi: &mut Wifi<T>,
-        ip: no_std_net::Ipv4Addr,
+        ip: Ipv4Addr,
         port: u16,
         protocol_mode: types::ProtocolMode,
     ) -> Result<(), error::Error<T::Error>> {

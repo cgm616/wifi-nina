@@ -1,5 +1,7 @@
 use core::fmt;
 
+use embedded_nal::Ipv4Addr;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Config<'a> {
     Station(StationConfig<'a>),
@@ -109,14 +111,14 @@ pub enum EncryptionType {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct NetworkData {
-    pub ip: no_std_net::Ipv4Addr,
-    pub mask: no_std_net::Ipv4Addr,
-    pub gateway: no_std_net::Ipv4Addr,
+    pub ip: Ipv4Addr,
+    pub mask: Ipv4Addr,
+    pub gateway: Ipv4Addr,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RemoteData {
-    pub ip: no_std_net::Ipv4Addr,
+    pub ip: Ipv4Addr,
     pub port: u32,
 }
 

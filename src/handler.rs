@@ -9,6 +9,8 @@ use crate::types;
 use core::fmt;
 use core::time;
 
+use embedded_nal::Ipv4Addr;
+
 #[derive(Debug)]
 pub struct Handler<T> {
     transport: T,
@@ -32,8 +34,8 @@ where
         self.handle_cmd(command::Command::GetConnStatusCmd, &(), &mut recv_params)?;
 
         let (status,) = recv_params;
-        let status =
-            types::ConnectionState::try_from(status).map_err(error::Error::BadConnectionStatus)?;
+        let status = types::ConnectionState::try_from(status)
+            .map_err(error::TcpError::BadConnectionStatus)?;
 
         Ok(status)
     }
@@ -132,7 +134,7 @@ where
         let (encryption_type,) = recv_params;
 
         let encryption_type = types::EncryptionType::try_from(encryption_type)
-            .map_err(error::Error::BadEncryptionType)?;
+            .map_err(error::TcpError::BadEncryptionType)?;
 
         Ok(encryption_type)
     }
@@ -192,7 +194,7 @@ where
         }
     }
 
-    pub fn get_host_by_name(&mut self) -> Result<no_std_net::Ipv4Addr, error::Error<T::Error>> {
+    pub fn get_host_by_name(&mut self) -> Result<Ipv4Addr, error::Error<T::Error>> {
         let mut recv_params = (param::Scalar::be(0u32),);
 
         self.handle_cmd(command::Command::GetHostByNameCmd, &(), &mut recv_params)?;
@@ -313,9 +315,9 @@ where
     pub fn config(
         &mut self,
         valid_params: u8,
-        local_ip: no_std_net::Ipv4Addr,
-        gateway: no_std_net::Ipv4Addr,
-        subnet: no_std_net::Ipv4Addr,
+        local_ip: Ipv4Addr,
+        gateway: Ipv4Addr,
+        subnet: Ipv4Addr,
     ) -> Result<(), error::Error<T::Error>> {
         let send_params = (
             valid_params,
@@ -343,8 +345,8 @@ where
     pub fn set_dns(
         &mut self,
         valid_params: u8,
-        dns_server1: no_std_net::Ipv4Addr,
-        dns_server2: no_std_net::Ipv4Addr,
+        dns_server1: Ipv4Addr,
+        dns_server2: Ipv4Addr,
     ) -> Result<(), error::Error<T::Error>> {
         let send_params = (
             valid_params,
@@ -470,14 +472,14 @@ where
         let (encryption_type,) = recv_params;
 
         let encryption_type = types::EncryptionType::try_from(encryption_type)
-            .map_err(error::Error::BadEncryptionType)?;
+            .map_err(error::TcpError::BadEncryptionType)?;
 
         Ok(encryption_type)
     }
 
     pub fn start_client_by_ip(
         &mut self,
-        ip: no_std_net::Ipv4Addr,
+        ip: Ipv4Addr,
         port: u16,
         socket: types::Socket,
         protocol_mode: types::ProtocolMode,
@@ -540,7 +542,7 @@ where
         )?;
 
         let (state,) = recv_params;
-        let state = types::TcpState::try_from(state).map_err(error::Error::BadTcpState)?;
+        let state = types::TcpState::try_from(state).map_err(error::TcpError::BadTcpState)?;
 
         Ok(state)
     }
