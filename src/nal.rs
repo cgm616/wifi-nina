@@ -31,7 +31,7 @@ impl<'a, 'b, T: Transport> Read for CombinedClient<'a, 'b, T> {
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), ReadExactError<Self::Error>> {
         self.client
             .recv_exact(self.wifi, buf)
-            .map_err(|e| ReadExactError::Other(e))
+            .map_err(ReadExactError::Other)
     }
 }
 

@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use crate::command;
 use crate::full_duplex::FullDuplexExt as _;
 use crate::params;

@@ -224,8 +224,8 @@ impl RecvParam for &mut [u8] {
             self[i] = spi.recv_exchange()?;
         }
 
-        let slice = mem::replace(self, &mut []);
-        *self = &mut slice[..len as usize];
+        let slice = mem::take(self);
+        *self = &mut slice[..len];
 
         Ok(())
     }

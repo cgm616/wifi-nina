@@ -118,10 +118,10 @@ where
         Err(error::TcpError::ConnectionFailure(actual_connection_state).into())
     }
 
-    pub fn scan_networks<'a>(
-        &'a mut self,
+    pub fn scan_networks(
+        &mut self,
     ) -> Result<
-        impl Iterator<Item = Result<types::ScannedNetwork, error::Error<T::Error>>> + 'a,
+        impl Iterator<Item = Result<types::ScannedNetwork, error::Error<T::Error>>> + '_,
         error::Error<T::Error>,
     > {
         self.handler.start_scan_networks()?;
