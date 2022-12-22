@@ -9,7 +9,7 @@ use crate::types;
 use core::fmt;
 use core::time;
 
-use embedded_nal::Ipv4Addr;
+use embedded_nal_async::Ipv4Addr;
 
 #[derive(Debug)]
 pub struct Handler<T> {

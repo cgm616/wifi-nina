@@ -1,7 +1,9 @@
+use embedded_io::Error as EioError;
+
 use crate::types;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Error<E> {
+pub enum Error<E: EioError> {
     Transport(E),
     SetNetwork,
     SetPassphrase,
@@ -30,8 +32,14 @@ pub enum TcpError {
     DataTooLong,
 }
 
-impl<E> From<TcpError> for Error<E> {
+impl<E: EioError> From<TcpError> for Error<E> {
     fn from(value: TcpError) -> Self {
         Error::Tcp(value)
+    }
+}
+
+impl<E: EioError> EioError for Error<E> {
+    fn kind(&self) -> embedded_io::ErrorKind {
+        embedded_io::ErrorKind::Other
     }
 }

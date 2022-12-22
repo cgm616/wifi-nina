@@ -1,6 +1,5 @@
 use super::full_duplex::FullDuplexExt as _;
 use super::param;
-use crate::param::SendParam;
 
 pub trait SendParams {
     fn len(&self, long: bool) -> usize {
@@ -337,8 +336,6 @@ where
     where
         S: embedded_hal::spi::FullDuplex<u8>,
     {
-        use crate::param::RecvParam;
-
         let len = spi.recv_exchange()?;
         for i in 0..len {
             log::trace!("param {}", i);

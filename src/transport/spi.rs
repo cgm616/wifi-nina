@@ -1,9 +1,10 @@
 use crate::command;
 use crate::full_duplex::FullDuplexExt as _;
 use crate::params;
-use core::fmt;
 use core::time;
+use core::{fmt, fmt::Debug};
 use embedded_hal::digital::v2::{InputPin, OutputPin};
+use embedded_io::Error as EioError;
 
 #[derive(Debug)]
 pub struct SpiTransport<SPI, BUSY, RESET, CS, DELAY> {
@@ -14,7 +15,7 @@ pub struct SpiTransport<SPI, BUSY, RESET, CS, DELAY> {
     delay: DELAY,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum SpiError<SPI, BUSY, RESET, CS> {
     Spi(SPI),
     Busy(BUSY),
@@ -23,6 +24,26 @@ pub enum SpiError<SPI, BUSY, RESET, CS> {
     Timeout,
     ErrorResponse,
     UnexpectedReplyByte(u8),
+}
+
+impl<SPI, BUSY, RESET, CS> Debug for SpiError<SPI, BUSY, RESET, CS> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Spi(_) => write!(f, "SPI"),
+            Self::Busy(_) => write!(f, "BUSY"),
+            Self::Reset(_) => write!(f, "WRITE"),
+            Self::ChipSelect(_) => write!(f, "CS"),
+            Self::Timeout => write!(f, "Timeout"),
+            Self::ErrorResponse => write!(f, "ErrorResponse"),
+            Self::UnexpectedReplyByte(b) => write!(f, "UnexpectedReplyByte: {b}"),
+        }
+    }
+}
+
+impl<SPI, BUSY, RESET, CS> EioError for SpiError<SPI, BUSY, RESET, CS> {
+    fn kind(&self) -> embedded_io::ErrorKind {
+        embedded_io::ErrorKind::Other
+    }
 }
 
 const START_CMD: u8 = 0xe0;

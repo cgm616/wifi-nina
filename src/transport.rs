@@ -1,3 +1,5 @@
+use embedded_io::Error as EioError;
+
 use crate::command;
 use crate::params;
 use core::fmt;
@@ -9,7 +11,7 @@ pub use spi::SpiError;
 pub use spi::SpiTransport;
 
 pub trait Transport {
-    type Error;
+    type Error: EioError;
 
     fn reset(&mut self) -> Result<(), Self::Error>;
 

@@ -1,6 +1,6 @@
 use core::fmt;
 
-use embedded_nal::Ipv4Addr;
+use embedded_nal_async::Ipv4Addr;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Config<'a> {

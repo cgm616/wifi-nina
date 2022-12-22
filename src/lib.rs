@@ -1,4 +1,7 @@
 #![no_std]
+#![feature(async_fn_in_trait)]
+#![feature(impl_trait_projections)]
+#![allow(incomplete_features)]
 
 use core::marker;
 use core::time;
@@ -16,7 +19,7 @@ pub mod types;
 
 pub use error::Error;
 
-use embedded_nal::Ipv4Addr;
+use embedded_nal_async::Ipv4Addr;
 
 const BUFFER_CAPACITY: usize = 4096;
 
