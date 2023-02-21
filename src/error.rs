@@ -1,10 +1,15 @@
+//! The errors that various functions in the crate can throw.
+
 use embedded_io::Error as EioError;
 
 use crate::types;
 
+/// An error arising from the underlying transport layer, the wifi layer, or
+/// the TCP layer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error<E: EioError> {
     Transport(E),
+    Delay,
     SetNetwork,
     SetPassphrase,
     SetKey,
@@ -23,6 +28,7 @@ pub enum Error<E: EioError> {
     Tcp(TcpError),
 }
 
+/// An error from the TCP layer.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum TcpError {
     ConnectionFailure(types::ConnectionState),

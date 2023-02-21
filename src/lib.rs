@@ -3,28 +3,38 @@
 #![feature(impl_trait_projections)]
 #![allow(incomplete_features)]
 
-use core::marker;
-use core::time;
-
+// Private modules
 mod command;
 mod encoding;
 mod error;
-mod full_duplex;
 mod handler;
-pub mod nal;
 mod param;
 mod params;
+
+use arrayvec::ArrayVec;
+use embedded_hal_async::delay::DelayUs;
+// Private internal imports
+use transport::Transport;
+
+// Public modules
+pub mod nal;
 pub mod transport;
 pub mod types;
 
+// Public internal imports
 pub use error::Error;
 
+// Core/std imports
+use core::marker;
+
+// External crate imports
 use embedded_nal_async::Ipv4Addr;
 
+// The length of the buffer to use for transmitting requests
 const BUFFER_CAPACITY: usize = 4096;
 
 #[derive(Debug)]
-pub struct Wifi<T> {
+pub struct Wifi<T: Transport> {
     handler: handler::Handler<T>,
     led_init: bool,
 }
@@ -47,68 +57,74 @@ where
         Self { handler, led_init }
     }
 
-    pub fn get_firmware_version(
+    pub async fn get_firmware_version(
         &mut self,
     ) -> Result<arrayvec::ArrayVec<u8, 16>, error::Error<T::Error>> {
-        self.handler.get_firmware_version()
+        self.handler.get_firmware_version().await
     }
 
-    pub fn set_led(&mut self, r: u8, g: u8, b: u8) -> Result<(), error::Error<T::Error>> {
+    pub async fn set_led(&mut self, r: u8, g: u8, b: u8) -> Result<(), error::Error<T::Error>> {
         if !self.led_init {
-            self.handler.pin_mode(25, types::PinMode::Output)?;
-            self.handler.pin_mode(26, types::PinMode::Output)?;
-            self.handler.pin_mode(27, types::PinMode::Output)?;
+            self.handler.pin_mode(25, types::PinMode::Output).await?;
+            self.handler.pin_mode(26, types::PinMode::Output).await?;
+            self.handler.pin_mode(27, types::PinMode::Output).await?;
             self.led_init = true;
         }
 
-        self.handler.analog_write(25, r)?;
-        self.handler.analog_write(26, g)?;
-        self.handler.analog_write(27, b)?;
+        self.handler.analog_write(25, r).await?;
+        self.handler.analog_write(26, g).await?;
+        self.handler.analog_write(27, b).await?;
 
         Ok(())
     }
 
-    pub fn configure(
+    pub async fn configure<DELAY: DelayUs>(
         &mut self,
-        config: types::Config,
-        connect_timeout: Option<time::Duration>,
+        config: types::Config<'_>,
+        delay: DELAY,
+        connect_timeout: Option<u32>,
     ) -> Result<(), error::Error<T::Error>> {
         match config {
             types::Config::Station(station_config) => match station_config.network {
-                types::NetworkConfig::Open { ssid } => self.handler.set_network(ssid)?,
+                types::NetworkConfig::Open { ssid } => self.handler.set_network(ssid).await?,
                 types::NetworkConfig::Password { ssid, password } => {
-                    self.handler.set_passphrase(ssid, password)?
+                    self.handler.set_passphrase(ssid, password).await?
                 }
             },
             types::Config::AccessPoint(_) => unimplemented!(),
         }
 
         if let Some(connect_timeout) = connect_timeout {
-            self.await_connection_state(types::ConnectionState::Connected, connect_timeout)?;
+            self.await_connection_state(types::ConnectionState::Connected, delay, connect_timeout)
+                .await?;
         }
 
         Ok(())
     }
 
-    pub fn await_connection_state(
+    pub async fn await_connection_state<DELAY: DelayUs>(
         &mut self,
         connection_state: types::ConnectionState,
-        timeout: time::Duration,
+        mut delay: DELAY,
+        timeout: u32,
     ) -> Result<(), error::Error<T::Error>> {
-        const POLL_INTEVAL: time::Duration = time::Duration::from_millis(100);
+        const POLL_INTERVAL: u32 = 100;
 
-        let mut total_time = time::Duration::new(0, 0);
+        let mut total_time = 0;
 
         let mut actual_connection_state;
         loop {
-            actual_connection_state = self.handler.get_connection_state()?;
+            actual_connection_state = self.handler.get_connection_state().await?;
             if connection_state == actual_connection_state {
                 return Ok(());
             }
 
-            self.handler.delay(POLL_INTEVAL)?;
+            delay
+                .delay_ms(POLL_INTERVAL)
+                .await
+                .map_err(|_| error::Error::Delay)?;
             // TODO: don't assume the actual SPI transfer takes 0 time :)
-            total_time += POLL_INTEVAL;
+            total_time += POLL_INTERVAL;
 
             if total_time > timeout {
                 break;
@@ -118,58 +134,58 @@ where
         Err(error::TcpError::ConnectionFailure(actual_connection_state).into())
     }
 
-    pub fn scan_networks(
+    pub async fn scan_networks(
         &mut self,
-    ) -> Result<
-        impl Iterator<Item = Result<types::ScannedNetwork, error::Error<T::Error>>> + '_,
-        error::Error<T::Error>,
-    > {
-        self.handler.start_scan_networks()?;
-        Ok(self
-            .handler
-            .get_scanned_networks()?
-            .into_iter()
-            .enumerate()
-            .map(move |(i, ssid)| {
-                let i = i as u8;
-                let rssi = self.handler.get_scanned_network_rssi(i)?;
-                let encryption_type = self.handler.get_scanned_network_encryption_type(i)?;
-                let bssid = self.handler.get_scanned_network_bssid(i)?;
-                let channel = self.handler.get_scanned_network_channel(i)?;
+    ) -> Result<ArrayVec<types::ScannedNetwork, 32>, error::Error<T::Error>> {
+        self.handler.start_scan_networks().await?;
 
-                Ok(types::ScannedNetwork {
-                    ssid,
-                    rssi,
-                    encryption_type,
-                    bssid,
-                    channel,
-                })
-            }))
+        let networks = self.handler.get_scanned_networks().await?;
+        let mut network_info = ArrayVec::new();
+
+        for (i, ssid) in networks.into_iter().enumerate() {
+            let i = i as u8;
+            let rssi = self.handler.get_scanned_network_rssi(i).await?;
+            let encryption_type = self.handler.get_scanned_network_encryption_type(i).await?;
+            let bssid = self.handler.get_scanned_network_bssid(i).await?;
+            let channel = self.handler.get_scanned_network_channel(i).await?;
+
+            network_info.push(types::ScannedNetwork {
+                ssid,
+                rssi,
+                encryption_type,
+                bssid,
+                channel,
+            });
+        }
+
+        Ok(network_info)
     }
 
-    pub fn ssid(&mut self) -> Result<arrayvec::ArrayVec<u8, 32>, error::Error<T::Error>> {
-        self.handler.get_current_ssid()
+    pub async fn ssid(&mut self) -> Result<arrayvec::ArrayVec<u8, 32>, error::Error<T::Error>> {
+        self.handler.get_current_ssid().await
     }
 
-    pub fn bssid(&mut self) -> Result<arrayvec::ArrayVec<u8, 6>, error::Error<T::Error>> {
-        self.handler.get_current_bssid()
+    pub async fn bssid(&mut self) -> Result<arrayvec::ArrayVec<u8, 6>, error::Error<T::Error>> {
+        self.handler.get_current_bssid().await
     }
 
-    pub fn rssi(&mut self) -> Result<i32, error::Error<T::Error>> {
-        self.handler.get_current_rssi()
+    pub async fn rssi(&mut self) -> Result<i32, error::Error<T::Error>> {
+        self.handler.get_current_rssi().await
     }
 
-    pub fn encryption_type(&mut self) -> Result<types::EncryptionType, error::Error<T::Error>> {
-        self.handler.get_current_encryption_type()
+    pub async fn encryption_type(
+        &mut self,
+    ) -> Result<types::EncryptionType, error::Error<T::Error>> {
+        self.handler.get_current_encryption_type().await
     }
 
-    pub fn resolve(&mut self, hostname: &str) -> Result<Ipv4Addr, error::Error<T::Error>> {
-        self.handler.request_host_by_name(hostname)?;
-        self.handler.get_host_by_name()
+    pub async fn resolve(&mut self, hostname: &str) -> Result<Ipv4Addr, error::Error<T::Error>> {
+        self.handler.request_host_by_name(hostname).await?;
+        self.handler.get_host_by_name().await
     }
 
-    pub fn new_client(&mut self) -> Result<Client<T>, error::Error<T::Error>> {
-        let socket = self.handler.get_socket()?;
+    pub async fn new_client(&mut self) -> Result<Client<T>, error::Error<T::Error>> {
+        let socket = self.handler.get_socket().await?;
         let buffer_offset = 0;
         let buffer = arrayvec::ArrayVec::new();
         let phantom = marker::PhantomData;
@@ -186,7 +202,7 @@ impl<T> Client<T>
 where
     T: transport::Transport,
 {
-    pub fn connect_ipv4(
+    pub async fn connect_ipv4(
         &mut self,
         wifi: &mut Wifi<T>,
         ip: Ipv4Addr,
@@ -195,36 +211,40 @@ where
     ) -> Result<(), error::Error<T::Error>> {
         wifi.handler
             .start_client_by_ip(ip, port, self.socket, protocol_mode)
+            .await
     }
 
-    pub fn send(
+    pub async fn send(
         &mut self,
         wifi: &mut Wifi<T>,
         data: &[u8],
     ) -> Result<usize, error::Error<T::Error>> {
         let len = data.len().min(u16::max_value() as usize);
-        let sent = wifi.handler.send_data(self.socket, &data[..len])?;
-        wifi.handler.check_data_sent(self.socket)?;
+        let sent = wifi.handler.send_data(self.socket, &data[..len]).await?;
+        wifi.handler.check_data_sent(self.socket).await?;
         Ok(sent)
     }
 
-    pub fn send_all(
+    pub async fn send_all(
         &mut self,
         wifi: &mut Wifi<T>,
         mut data: &[u8],
     ) -> Result<(), error::Error<T::Error>> {
         while !data.is_empty() {
-            let len = self.send(wifi, data)?;
+            let len = self.send(wifi, data).await?;
             data = &data[len..];
         }
         Ok(())
     }
 
-    pub fn state(&mut self, wifi: &mut Wifi<T>) -> Result<types::TcpState, error::Error<T::Error>> {
-        wifi.handler.get_client_state(self.socket)
+    pub async fn state(
+        &mut self,
+        wifi: &mut Wifi<T>,
+    ) -> Result<types::TcpState, error::Error<T::Error>> {
+        wifi.handler.get_client_state(self.socket).await
     }
 
-    pub fn recv(
+    pub async fn recv(
         &mut self,
         wifi: &mut Wifi<T>,
         data: &mut [u8],
@@ -236,10 +256,11 @@ where
                 .unwrap();
             let recv_len = wifi
                 .handler
-                .get_data_buf(self.socket, self.buffer.as_mut())?;
+                .get_data_buf(self.socket, self.buffer.as_mut())
+                .await?;
             self.buffer.truncate(recv_len);
             self.buffer_offset = 0;
-            log::debug!("fetched new buffer of len {}", self.buffer.len());
+            defmt::debug!("fetched new buffer of len {}", self.buffer.len());
         }
 
         let len = data.len().min(self.buffer.len() - self.buffer_offset);
@@ -248,13 +269,13 @@ where
         Ok(len)
     }
 
-    pub fn recv_exact(
+    pub async fn recv_exact(
         &mut self,
         wifi: &mut Wifi<T>,
         mut data: &mut [u8],
     ) -> Result<(), error::Error<T::Error>> {
         while !data.is_empty() {
-            let len = self.recv(wifi, data)?;
+            let len = self.recv(wifi, data).await?;
             data = &mut data[len..];
         }
         Ok(())

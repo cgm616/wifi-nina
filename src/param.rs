@@ -1,6 +1,8 @@
-use super::full_duplex::FullDuplexExt as _;
-use crate::encoding;
+use embedded_hal_async::spi::{SpiBusRead, SpiBusWrite};
+
 use core::marker;
+
+use crate::encoding;
 
 pub trait SendParam {
     fn len(&self) -> usize;
@@ -9,30 +11,30 @@ pub trait SendParam {
         self.len() + if long { 2 } else { 1 }
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
+    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>;
+        S: SpiBusWrite;
 
-    fn send_length_delimited<S>(&self, spi: &mut S, long: bool) -> Result<(), S::Error>
+    async fn send_length_delimited<S>(&self, spi: &mut S, long: bool) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusWrite,
     {
-        encoding::send_len(spi, long, self.len())?;
-        self.send(spi)
+        encoding::send_len(spi, long, self.len()).await?;
+        self.send(spi).await
     }
 }
 
 pub trait RecvParam {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
+    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>;
+        S: SpiBusRead;
 
-    fn recv_length_delimited<S>(&mut self, spi: &mut S, long: bool) -> Result<(), S::Error>
+    async fn recv_length_delimited<S>(&mut self, spi: &mut S, long: bool) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusRead,
     {
-        let len = encoding::recv_len(spi, long)?;
-        self.recv(spi, len)
+        let len = encoding::recv_len(spi, long).await?;
+        self.recv(spi, len).await
     }
 }
 
@@ -60,11 +62,11 @@ where
         (*self).len()
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
+    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusWrite,
     {
-        (*self).send(spi)
+        (*self).send(spi).await
     }
 }
 
@@ -72,11 +74,11 @@ impl<A> RecvParam for &mut A
 where
     A: RecvParam + ?Sized,
 {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
+    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusRead,
     {
-        (*self).recv(spi, len)
+        (*self).recv(spi, len).await
     }
 }
 
@@ -85,22 +87,25 @@ impl SendParam for u8 {
         1
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
+    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusWrite,
     {
-        spi.send_exchange(*self)?;
+        let buf = [*self];
+        spi.write(&buf).await?;
         Ok(())
     }
 }
 
 impl RecvParam for u8 {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
+    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusRead,
     {
         assert_eq!(1, len);
-        *self = spi.recv_exchange()?;
+        let mut buf = [0; 1];
+        spi.read(&mut buf).await?;
+        *self = buf[0];
         Ok(())
     }
 }
@@ -113,15 +118,13 @@ where
         2
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
+    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusWrite,
     {
         let mut buf = [0; 2];
         O::write_u16(&mut buf, self.value);
-        spi.send_exchange(buf[0])?;
-        spi.send_exchange(buf[1])?;
-        Ok(())
+        spi.write(&buf).await
     }
 }
 
@@ -129,14 +132,13 @@ impl<O> RecvParam for Scalar<O, u16>
 where
     O: byteorder::ByteOrder,
 {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
+    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusRead,
     {
         assert_eq!(2, len);
         let mut buf = [0; 2];
-        buf[0] = spi.recv_exchange()?;
-        buf[1] = spi.recv_exchange()?;
+        spi.read(&mut buf).await?;
         self.value = O::read_u16(&buf);
         Ok(())
     }
@@ -150,17 +152,13 @@ where
         4
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
+    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusWrite,
     {
         let mut buf = [0; 4];
         O::write_u32(&mut buf, self.value);
-        spi.send_exchange(buf[0])?;
-        spi.send_exchange(buf[1])?;
-        spi.send_exchange(buf[2])?;
-        spi.send_exchange(buf[3])?;
-        Ok(())
+        spi.write(&buf).await
     }
 }
 
@@ -168,16 +166,13 @@ impl<O> RecvParam for Scalar<O, u32>
 where
     O: byteorder::ByteOrder,
 {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
+    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusRead,
     {
         assert_eq!(4, len);
         let mut buf = [0; 4];
-        buf[0] = spi.recv_exchange()?;
-        buf[1] = spi.recv_exchange()?;
-        buf[2] = spi.recv_exchange()?;
-        buf[3] = spi.recv_exchange()?;
+        spi.read(&mut buf).await?;
         self.value = O::read_u32(&buf);
         Ok(())
     }
@@ -188,15 +183,11 @@ impl SendParam for [u8] {
         self.len()
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
+    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusWrite,
     {
-        for &byte in self.iter() {
-            spi.send_exchange(byte)?;
-        }
-
-        Ok(())
+        spi.write(self).await
     }
 }
 
@@ -205,24 +196,22 @@ impl<const CAP: usize> SendParam for arrayvec::ArrayVec<u8, CAP> {
         self.len()
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
+    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusWrite,
     {
-        SendParam::send(self.as_slice(), spi)
+        SendParam::send(self.as_slice(), spi).await
     }
 }
 
 impl RecvParam for &mut [u8] {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
+    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusRead,
     {
         use core::mem;
 
-        for i in 0..len {
-            self[i] = spi.recv_exchange()?;
-        }
+        spi.read(self).await?;
 
         let slice = mem::take(self);
         *self = &mut slice[..len];
@@ -232,13 +221,13 @@ impl RecvParam for &mut [u8] {
 }
 
 impl<const CAP: usize> RecvParam for arrayvec::ArrayVec<u8, CAP> {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
+    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusRead,
     {
-        for _ in 0..len {
-            self.push(spi.recv_exchange()?);
-        }
+        let start_index = self.len();
+        self.extend(core::iter::repeat(0).take(len));
+        spi.read(&mut self[start_index..]).await?;
 
         Ok(())
     }
@@ -252,13 +241,13 @@ where
         self.0.len() + 1
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
+    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusWrite,
     {
-        self.0.send(spi)?;
-        spi.send_exchange(0)?;
-        Ok(())
+        self.0.send(spi).await?;
+        let buf = [0; 1];
+        spi.write(&buf).await
     }
 }
 
@@ -266,12 +255,14 @@ impl<A> RecvParam for NullTerminated<A>
 where
     A: RecvParam,
 {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
+    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
     where
-        S: embedded_hal::spi::FullDuplex<u8>,
+        S: SpiBusRead,
     {
-        self.0.recv(spi, len - 1)?;
-        assert_eq!(0, spi.recv_exchange()?);
+        self.0.recv(spi, len - 1).await?;
+        let mut buf = [1; 1];
+        spi.read(&mut buf).await?;
+        assert_eq!(0, buf[0]);
         Ok(())
     }
 }

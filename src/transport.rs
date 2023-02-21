@@ -1,9 +1,10 @@
+use embedded_hal_async::delay::DelayUs;
 use embedded_io::Error as EioError;
+
+use core::fmt;
 
 use crate::command;
 use crate::params;
-use core::fmt;
-use core::time;
 
 mod spi;
 
@@ -13,11 +14,9 @@ pub use spi::SpiTransport;
 pub trait Transport {
     type Error: EioError;
 
-    fn reset(&mut self) -> Result<(), Self::Error>;
+    async fn reset<DELAY: DelayUs>(&mut self, delay: DELAY) -> Result<(), Self::Error>;
 
-    fn delay(&mut self, duration: time::Duration) -> Result<(), Self::Error>;
-
-    fn handle_cmd<SP, RP>(
+    async fn handle_cmd<SP, RP>(
         &mut self,
         command: command::Command,
         send_params: &SP,
