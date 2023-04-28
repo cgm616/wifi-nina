@@ -5,10 +5,11 @@ use crate::params;
 
 use core::{fmt, fmt::Debug};
 
-use embedded_hal::digital::{InputPin, OutputPin};
+use embedded_hal::digital::OutputPin;
+use embedded_hal_async::digital::Wait;
 use embedded_hal_async::{
     delay::DelayUs,
-    spi::{transaction, ErrorType, SpiBus, SpiBusRead, SpiBusWrite, SpiDevice},
+    spi::{Operation, SpiDevice},
 };
 use embedded_io::Error as EioError;
 
@@ -22,9 +23,8 @@ pub struct SpiTransport<SPI, BUSY, RESET> {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub enum SpiError<SPI, BUS, BUSY, RESET> {
+pub enum SpiError<SPI, BUSY, RESET> {
     Spi(SPI),
-    Bus(BUS),
     Busy(BUSY),
     Reset(RESET),
     Delay,
@@ -33,22 +33,21 @@ pub enum SpiError<SPI, BUS, BUSY, RESET> {
     UnexpectedReplyByte(u8),
 }
 
-impl<SPI, BUS, BUSY, RESET> Debug for SpiError<SPI, BUS, BUSY, RESET> {
+impl<SPI, BUSY, RESET> Debug for SpiError<SPI, BUSY, RESET> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Spi(_) => write!(f, "SPI"),
-            Self::Bus(_) => write!(f, "BUS"),
             Self::Busy(_) => write!(f, "BUSY"),
             Self::Reset(_) => write!(f, "WRITE"),
             Self::Delay => write!(f, "DELAY"),
-            Self::Timeout => write!(f, "Timeout"),
+            Self::Timeout => write!(f, "Timeout!"),
             Self::ErrorResponse => write!(f, "ErrorResponse"),
             Self::UnexpectedReplyByte(b) => write!(f, "UnexpectedReplyByte: {b}"),
         }
     }
 }
 
-impl<SPI, BUS, BUSY, RESET> EioError for SpiError<SPI, BUS, BUSY, RESET> {
+impl<SPI, BUSY, RESET> EioError for SpiError<SPI, BUSY, RESET> {
     fn kind(&self) -> embedded_io::ErrorKind {
         embedded_io::ErrorKind::Other
     }
@@ -58,16 +57,15 @@ const START_CMD: u8 = 0xe0;
 const END_CMD: u8 = 0xee;
 const ERR_CMD: u8 = 0xef;
 const REPLY_FLAG: u8 = 1 << 7;
-const WAIT_REPLY_TIMEOUT_BYTES: usize = 1000;
+// const WAIT_REPLY_TIMEOUT_BYTES: usize = 1000;
 
 impl<SPI, BUSY, RESET> super::Transport for SpiTransport<SPI, BUSY, RESET>
 where
     SPI: SpiDevice,
-    SPI::Bus: SpiBus,
-    BUSY: InputPin,
+    BUSY: Wait,
     RESET: OutputPin,
 {
-    type Error = SpiError<SPI::Error, <SPI::Bus as ErrorType>::Error, BUSY::Error, RESET::Error>;
+    type Error = SpiError<SPI::Error, BUSY::Error, RESET::Error>;
 
     #[inline]
     async fn reset<DELAY: DelayUs>(&mut self, mut delay: DELAY) -> Result<(), Self::Error> {
@@ -76,14 +74,14 @@ where
         #[cfg(not(feature = "reset-high"))]
         self.reset.set_low().map_err(SpiError::Reset)?;
 
-        delay.delay_ms(10).await.map_err(|_| SpiError::Delay)?;
+        delay.delay_ms(100).await;
 
         #[cfg(feature = "reset-high")]
         self.reset.set_low().map_err(SpiError::Reset)?;
         #[cfg(not(feature = "reset-high"))]
         self.reset.set_high().map_err(SpiError::Reset)?;
 
-        delay.delay_ms(750).await.map_err(|_| SpiError::Delay)?;
+        delay.delay_ms(750).await;
 
         Ok(())
     }
@@ -101,79 +99,61 @@ where
         SP: params::SendParams + fmt::Debug,
         RP: params::RecvParams + fmt::Debug,
     {
-        // TODO: check busy pin!
+        // Set up buffer to hold data
+        let mut buf: [u8; 1024] = [0; 1024];
 
-        // wait for busy pin to be low before transaction
+        // Wait until the WifiNina is ready to receive
+        let busy = &mut self.busy;
+        busy.wait_for_low().await.map_err(SpiError::Busy)?;
 
-        transaction!(&mut self.spi, move |bus| async move {
-            // wait for busy pin to be high before sending
+        // Set up command to send
+        buf[0] = START_CMD;
+        buf[1] = u8::from(command) & !REPLY_FLAG;
+        let len = send_params.serialize(&mut buf[2..], long_send);
+        buf[2 + len] = END_CMD;
 
-            // Write the byte indicating we're sending a command
-            bus.write(&[START_CMD]).await?;
-            // Write the command byte
-            bus.write(&[u8::from(command) & !REPLY_FLAG]).await?;
-            // Send the command parameters
-            send_params.send(bus, long_send).await?;
-            // Write the end command byte
-            bus.write(&[END_CMD]).await?;
+        // Pad the buffer to the nearest multiple of four
+        let mut len = 2 + len + 1; // the number of current bytes in the buffer
+        while len % 4 != 0 {
+            buf[len] = 0xFF;
+            len += 1;
+        }
 
-            // Make sure the whole message is padded
-            let mut total_len = send_params.len(long_send) + 3;
-            while 0 != total_len % 4 {
-                bus.write(&[0xff]).await?;
-                total_len += 1;
-            }
+        // Send the command in the buffer
+        self.spi
+            .transaction(&mut [Operation::Write(&buf[0..len])])
+            .await
+            .map_err(SpiError::Spi)?;
 
-            Result::<(), <SPI::Bus as ErrorType>::Error>::Ok(())
-        })
-        .await
-        .map_err(SpiError::Spi)?;
+        // Wait until the WifiNina is ready to respond
+        let busy = &mut self.busy;
+        busy.wait_for_low().await.map_err(SpiError::Busy)?;
 
-        // wait for busy pin to be low before transaction
+        // Receive data into the buffer
+        self.spi
+            .transaction(&mut [Operation::Read(&mut buf)])
+            .await
+            .map_err(SpiError::Spi)?;
 
-        transaction!(&mut self.spi, move |bus| async move {
-            // wait for busy pin to be high before receiving
+        // Make sure the first byte doesn't indicate an error
+        if buf[0] == ERR_CMD {
+            return Err(SpiError::ErrorResponse);
+        } else if buf[0] != START_CMD {
+            return Err(SpiError::UnexpectedReplyByte(buf[0]));
+        }
 
-            // Wait until receiving the byte indicating a response. If it does
-            // not come in time, throw an error and end the transaction.
-            let mut i = 0;
-            loop {
-                if i > WAIT_REPLY_TIMEOUT_BYTES {
-                    return Ok(Err(SpiError::Timeout));
-                }
+        // Make sure the WifiNina is responding to the correct command
+        if buf[1] != u8::from(command) | REPLY_FLAG {
+            return Err(SpiError::UnexpectedReplyByte(buf[1]));
+        }
 
-                let mut buf = [0];
-                bus.read(&mut buf).await?;
+        // Parse the response
+        let len = recv_params.parse(&buf[2..], long_recv);
 
-                if buf[0] == ERR_CMD {
-                    return Ok(Err(SpiError::ErrorResponse));
-                } else if buf[0] == START_CMD {
-                    break;
-                }
-
-                i += 1;
-            }
-
-            // Make sure the device is responding to the expected command
-            let mut buf = [0];
-            bus.read(&mut buf).await?;
-            if buf[0] != u8::from(command) | REPLY_FLAG {
-                return Ok(Err(SpiError::UnexpectedReplyByte(buf[0])));
-            }
-
-            // Receive the response
-            recv_params.recv(bus, long_recv).await?;
-
-            // The device should finish with the end byte
-            bus.read(&mut buf).await?;
-            if buf[0] != END_CMD {
-                return Ok(Err(SpiError::UnexpectedReplyByte(buf[0])));
-            }
-
-            Ok(Ok(()))
-        })
-        .await
-        .map_err(SpiError::Spi)??;
+        // Ensure the WifiNina is finished
+        if buf[2 + len] != END_CMD {
+            return Err(SpiError::UnexpectedReplyByte(buf[2 + len]));
+        }
 
         Ok(())
     }
@@ -182,8 +162,7 @@ where
 impl<SPI, BUSY, RESET> SpiTransport<SPI, BUSY, RESET>
 where
     SPI: SpiDevice,
-    SPI::Bus: SpiBus,
-    BUSY: InputPin,
+    BUSY: Wait,
     RESET: OutputPin,
 {
     #[inline]

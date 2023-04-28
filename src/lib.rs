@@ -2,6 +2,7 @@
 #![feature(async_fn_in_trait)]
 #![feature(impl_trait_projections)]
 #![allow(incomplete_features)]
+#![feature(generic_const_exprs)]
 
 // Private modules
 mod command;
@@ -119,10 +120,7 @@ where
                 return Ok(());
             }
 
-            delay
-                .delay_ms(POLL_INTERVAL)
-                .await
-                .map_err(|_| error::Error::Delay)?;
+            delay.delay_ms(POLL_INTERVAL).await;
             // TODO: don't assume the actual SPI transfer takes 0 time :)
             total_time += POLL_INTERVAL;
 

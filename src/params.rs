@@ -1,48 +1,37 @@
-use embedded_hal_async::spi::{SpiBusRead, SpiBusWrite};
+use arrayvec::ArrayVec;
 
 use super::param;
 
+/// A collection of parameters that can be sent to the WifiNina
 pub trait SendParams {
-    fn len(&self, long: bool) -> usize {
-        self.param_len(long) + 1
-    }
+    /// Return the length, in bytes, of sending the parameters
+    fn len(&self, long: bool) -> usize;
 
-    fn param_len(&self, long: bool) -> usize;
-
-    async fn send<S>(&self, spi: &mut S, long: bool) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite;
+    /// Serialize the parameters into the provided buffer, returning the length written
+    fn serialize(&self, buf: &mut [u8], long: bool) -> usize;
 }
 
+/// A collection of parameters that can be received from the WifiNina
 pub trait RecvParams {
-    async fn recv<S>(&mut self, spi: &mut S, long: bool) -> Result<(), S::Error>
-    where
-        S: SpiBusRead;
+    /// Parse the parameters from the contents of a buffer
+    fn parse(&mut self, buf: &[u8], long: bool) -> usize;
 }
 
 impl SendParams for () {
-    fn param_len(&self, _long: bool) -> usize {
-        0
+    fn len(&self, _long: bool) -> usize {
+        1
     }
 
-    async fn send<S>(&self, spi: &mut S, _long: bool) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite,
-    {
-        let buf = [0; 1];
-        spi.write(&buf).await
+    fn serialize(&self, buf: &mut [u8], _long: bool) -> usize {
+        buf[0] = 0;
+        1
     }
 }
 
 impl RecvParams for () {
-    async fn recv<S>(&mut self, spi: &mut S, _long: bool) -> Result<(), S::Error>
-    where
-        S: SpiBusRead,
-    {
-        let mut buf = [1; 1];
-        spi.read(&mut buf).await?;
+    fn parse(&mut self, buf: &[u8], _long: bool) -> usize {
         assert_eq!(0, buf[0]);
-        Ok(())
+        1
     }
 }
 
@@ -58,26 +47,23 @@ macro_rules! tuple_impls {
             $head: param::SendParam,
             $( $tail: param::SendParam ),*
         {
-            fn param_len(&self, long: bool) -> usize {
+            fn len(&self, long: bool) -> usize {
                 #[allow(non_snake_case)]
                 let ($head, $( $tail ),*) = self;
-                $head.len_length_delimited(long) $(+ $tail.len_length_delimited(long) )*
+                1 + $head.len_length_delimited(long) $(+ $tail.len_length_delimited(long) )*
             }
 
-            async fn send<S>(&self, spi: &mut S, long: bool) -> Result<(), S::Error>
-            where
-                S: SpiBusWrite,
-            {
+            fn serialize(&self, buf: &mut [u8], long: bool) -> usize {
                 #[allow(non_snake_case)]
                 let ($head, $( $tail ),*) = self;
                 let num = count!($head $( $tail )*);
-                let buf = [num];
-                spi.write(&buf).await?;
-                $head.send_length_delimited(spi, long).await?;
+                buf[0] = num;
+                let mut len = 1;
+                len = len + $head.serialize_length_delimited(&mut buf[len..], long);
                 $(
-                    $tail.send_length_delimited(spi, long).await?;
+                    len = len + $tail.serialize_length_delimited(&mut buf[len..], long);
                 )*
-                Ok(())
+                len
             }
         }
 
@@ -86,21 +72,19 @@ macro_rules! tuple_impls {
             $head: param::RecvParam,
             $( $tail: param::RecvParam ),*
         {
-            async fn recv<S>(&mut self, spi: &mut S, long: bool) -> Result<(), S::Error>
-            where
-                S: SpiBusRead,
+            fn parse(&mut self, buf: &[u8], long: bool) -> usize
             {
                 #[allow(non_snake_case)]
                 let ($head, $( $tail ),*) = self;
                 let num = count!($head $( $tail )*);
-                let mut buf = [0; 1];
-                spi.read(&mut buf).await?;
+
                 assert_eq!(num, buf[0]);
-                $head.recv_length_delimited(spi, long).await?;
+                let mut len = 1;
+                len = len + $head.parse_length_delimited(&buf[len..], long);
                 $(
-                    $tail.recv_length_delimited(spi, long).await?;
+                    len = len + $tail.parse_length_delimited(&buf[len..], long);
                 )*
-                Ok(())
+                len
             }
         }
 
@@ -112,27 +96,27 @@ macro_rules! tuple_impls {
 
 tuple_impls!(A, B, C, D, E,);
 
-impl<T, const CAP: usize> SendParams for arrayvec::ArrayVec<T, CAP>
+impl<T, const CAP: usize> SendParams for ArrayVec<T, CAP>
 where
     T: param::SendParam,
 {
-    fn param_len(&self, long: bool) -> usize {
-        self.iter().map(|p| p.len_length_delimited(long)).sum()
+    fn len(&self, long: bool) -> usize {
+        1 + self
+            .iter()
+            .map(|p| p.len_length_delimited(long))
+            .sum::<usize>()
     }
 
-    async fn send<S>(&self, spi: &mut S, long: bool) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite,
-    {
+    fn serialize(&self, buf: &mut [u8], long: bool) -> usize {
         use core::convert::TryFrom;
 
         let len = u8::try_from(self.len()).unwrap(); // TODO:: do we really want to unwrap?
-        let buf = [len];
-        spi.write(&buf).await?;
+        buf[0] = len;
+        let mut cursor = 1;
         for item in self.iter() {
-            item.send_length_delimited(spi, long).await?;
+            cursor = cursor + item.serialize_length_delimited(&mut buf[cursor..], long);
         }
-        Ok(())
+        cursor
     }
 }
 
@@ -140,18 +124,14 @@ impl<T, const CAP: usize> RecvParams for arrayvec::ArrayVec<T, CAP>
 where
     T: param::RecvParam + Default,
 {
-    async fn recv<S>(&mut self, spi: &mut S, long: bool) -> Result<(), S::Error>
-    where
-        S: SpiBusRead,
-    {
-        let mut buf = [0];
-        spi.read(&mut buf).await?;
-
-        for _ in 0..buf[0] {
+    fn parse(&mut self, buf: &[u8], long: bool) -> usize {
+        let items = buf[0];
+        let mut cursor = 1;
+        for _ in 0..items {
             let mut item: T = Default::default();
-            item.recv_length_delimited(spi, long).await?;
+            cursor = cursor + item.parse_length_delimited(&buf[cursor..], long);
             self.push(item);
         }
-        Ok(())
+        cursor
     }
 }

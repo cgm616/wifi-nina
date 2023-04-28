@@ -1,49 +1,56 @@
-use embedded_hal_async::spi::{SpiBusRead, SpiBusWrite};
+use arrayvec::ArrayVec;
 
 use core::marker;
 
 use crate::encoding;
 
+/// A parameter for a WifiNina command
 pub trait SendParam {
+    /// Return the length, in bytes, of sending the parameter
     fn len(&self) -> usize;
 
+    /// Return the length, in bytes, of sending the parameter if length-delimited
     fn len_length_delimited(&self, long: bool) -> usize {
         self.len() + if long { 2 } else { 1 }
     }
 
-    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite;
+    /// Serialize the parameter into the provided buffer and return the length written
+    ///
+    /// Panics if the parameter is too long to be serialized into the buffer
+    fn serialize(&self, buf: &mut [u8]) -> usize;
 
-    async fn send_length_delimited<S>(&self, spi: &mut S, long: bool) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite,
-    {
-        encoding::send_len(spi, long, self.len()).await?;
-        self.send(spi).await
+    /// Serialize the parameter into the provided buffer with its length first and return the total length written
+    fn serialize_length_delimited(&self, buf: &mut [u8], long: bool) -> usize {
+        let len = self.len();
+        let written = encoding::serialize_len(buf, long, len);
+        written + self.serialize(&mut buf[written..])
     }
 }
 
+/// A parameters that can be received from the WifiNina
 pub trait RecvParam {
-    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: SpiBusRead;
+    /// Parse the parameter from the contents of a buffer, knowing the length ahead of time
+    ///
+    /// Returns the length parsed from the buffer
+    fn parse(&mut self, buf: &[u8], len: usize) -> usize;
 
-    async fn recv_length_delimited<S>(&mut self, spi: &mut S, long: bool) -> Result<(), S::Error>
-    where
-        S: SpiBusRead,
-    {
-        let len = encoding::recv_len(spi, long).await?;
-        self.recv(spi, len).await
+    /// Parse the parameter from a buffer without knowing its length
+    ///
+    /// Returns the length parsed from the buffer
+    fn parse_length_delimited(&mut self, buf: &[u8], long: bool) -> usize {
+        let (len, read) = encoding::parse_len(buf, long);
+        read + self.parse(&buf[read..], len)
     }
 }
 
+/// A wrapper type to null-terminate any parameter
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct NullTerminated<A>(A)
 where
     A: ?Sized;
 
+/// A scalar value with a certain endian-ness and length
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar<O, A>
@@ -62,11 +69,8 @@ where
         (*self).len()
     }
 
-    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite,
-    {
-        (*self).send(spi).await
+    fn serialize(&self, buf: &mut [u8]) -> usize {
+        (*self).serialize(buf)
     }
 }
 
@@ -74,11 +78,8 @@ impl<A> RecvParam for &mut A
 where
     A: RecvParam + ?Sized,
 {
-    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: SpiBusRead,
-    {
-        (*self).recv(spi, len).await
+    fn parse(&mut self, buf: &[u8], len: usize) -> usize {
+        (*self).parse(buf, len)
     }
 }
 
@@ -87,26 +88,17 @@ impl SendParam for u8 {
         1
     }
 
-    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite,
-    {
-        let buf = [*self];
-        spi.write(&buf).await?;
-        Ok(())
+    fn serialize(&self, buf: &mut [u8]) -> usize {
+        buf[0] = *self;
+        1
     }
 }
 
 impl RecvParam for u8 {
-    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: SpiBusRead,
-    {
+    fn parse(&mut self, buf: &[u8], len: usize) -> usize {
         assert_eq!(1, len);
-        let mut buf = [0; 1];
-        spi.read(&mut buf).await?;
         *self = buf[0];
-        Ok(())
+        1
     }
 }
 
@@ -118,13 +110,9 @@ where
         2
     }
 
-    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite,
-    {
-        let mut buf = [0; 2];
-        O::write_u16(&mut buf, self.value);
-        spi.write(&buf).await
+    fn serialize(&self, buf: &mut [u8]) -> usize {
+        O::write_u16(buf, self.value);
+        2
     }
 }
 
@@ -132,15 +120,10 @@ impl<O> RecvParam for Scalar<O, u16>
 where
     O: byteorder::ByteOrder,
 {
-    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: SpiBusRead,
-    {
+    fn parse(&mut self, buf: &[u8], len: usize) -> usize {
         assert_eq!(2, len);
-        let mut buf = [0; 2];
-        spi.read(&mut buf).await?;
         self.value = O::read_u16(&buf);
-        Ok(())
+        2
     }
 }
 
@@ -152,13 +135,9 @@ where
         4
     }
 
-    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite,
-    {
-        let mut buf = [0; 4];
-        O::write_u32(&mut buf, self.value);
-        spi.write(&buf).await
+    fn serialize(&self, buf: &mut [u8]) -> usize {
+        O::write_u32(buf, self.value);
+        4
     }
 }
 
@@ -166,15 +145,10 @@ impl<O> RecvParam for Scalar<O, u32>
 where
     O: byteorder::ByteOrder,
 {
-    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: SpiBusRead,
-    {
+    fn parse(&mut self, buf: &[u8], len: usize) -> usize {
         assert_eq!(4, len);
-        let mut buf = [0; 4];
-        spi.read(&mut buf).await?;
         self.value = O::read_u32(&buf);
-        Ok(())
+        4
     }
 }
 
@@ -183,53 +157,37 @@ impl SendParam for [u8] {
         self.len()
     }
 
-    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite,
-    {
-        spi.write(self).await
+    fn serialize(&self, buf: &mut [u8]) -> usize {
+        assert!(self.len() <= buf.len());
+        (&mut buf[..self.len()]).copy_from_slice(self);
+        self.len()
     }
 }
 
-impl<const CAP: usize> SendParam for arrayvec::ArrayVec<u8, CAP> {
+impl<const CAP: usize> SendParam for ArrayVec<u8, CAP> {
     fn len(&self) -> usize {
         self.len()
     }
 
-    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite,
-    {
-        SendParam::send(self.as_slice(), spi).await
+    fn serialize(&self, buf: &mut [u8]) -> usize {
+        assert!(self.len() <= buf.len());
+        (&mut buf[..self.len()]).copy_from_slice(self.as_slice());
+        self.len()
     }
 }
 
 impl RecvParam for &mut [u8] {
-    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: SpiBusRead,
-    {
-        use core::mem;
-
-        spi.read(self).await?;
-
-        let slice = mem::take(self);
-        *self = &mut slice[..len];
-
-        Ok(())
+    fn parse(&mut self, buf: &[u8], len: usize) -> usize {
+        self.copy_from_slice(&buf[..len]);
+        len
     }
 }
 
-impl<const CAP: usize> RecvParam for arrayvec::ArrayVec<u8, CAP> {
-    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: SpiBusRead,
-    {
-        let start_index = self.len();
-        self.extend(core::iter::repeat(0).take(len));
-        spi.read(&mut self[start_index..]).await?;
-
-        Ok(())
+impl<const CAP: usize> RecvParam for ArrayVec<u8, CAP> {
+    fn parse(&mut self, buf: &[u8], len: usize) -> usize {
+        self.try_extend_from_slice(&buf[..len])
+            .expect("ArrayVec should have enough capacity"); // TODO
+        len
     }
 }
 
@@ -241,13 +199,10 @@ where
         self.0.len() + 1
     }
 
-    async fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: SpiBusWrite,
-    {
-        self.0.send(spi).await?;
-        let buf = [0; 1];
-        spi.write(&buf).await
+    fn serialize(&self, buf: &mut [u8]) -> usize {
+        let len = self.0.serialize(buf);
+        buf[len] = 0;
+        len + 1
     }
 }
 
@@ -255,15 +210,11 @@ impl<A> RecvParam for NullTerminated<A>
 where
     A: RecvParam,
 {
-    async fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: SpiBusRead,
-    {
-        self.0.recv(spi, len - 1).await?;
-        let mut buf = [1; 1];
-        spi.read(&mut buf).await?;
-        assert_eq!(0, buf[0]);
-        Ok(())
+    fn parse(&mut self, buf: &[u8], len: usize) -> usize {
+        let read = self.0.parse(buf, len - 1);
+        assert_eq!(read, len - 1);
+        assert_eq!(0, buf[read]);
+        read + 1
     }
 }
 
