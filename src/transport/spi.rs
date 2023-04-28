@@ -30,7 +30,7 @@ pub enum SpiError<SPI, BUSY, RESET> {
     Delay,
     Timeout,
     ErrorResponse,
-    UnexpectedReplyByte(u8),
+    UnexpectedReplyByte(u8, u8),
 }
 
 impl<SPI, BUSY, RESET> Debug for SpiError<SPI, BUSY, RESET> {
@@ -40,9 +40,9 @@ impl<SPI, BUSY, RESET> Debug for SpiError<SPI, BUSY, RESET> {
             Self::Busy(_) => write!(f, "BUSY"),
             Self::Reset(_) => write!(f, "WRITE"),
             Self::Delay => write!(f, "DELAY"),
-            Self::Timeout => write!(f, "Timeout!"),
-            Self::ErrorResponse => write!(f, "ErrorResponse"),
-            Self::UnexpectedReplyByte(b) => write!(f, "UnexpectedReplyByte: {b}"),
+            Self::Timeout => write!(f, "Timeout"),
+            Self::ErrorResponse => write!(f, "ErrResp"),
+            Self::UnexpectedReplyByte(b, loc) => write!(f, "URB: 0x{b:02x} at {loc}"),
         }
     }
 }
@@ -139,12 +139,12 @@ where
         if buf[0] == ERR_CMD {
             return Err(SpiError::ErrorResponse);
         } else if buf[0] != START_CMD {
-            return Err(SpiError::UnexpectedReplyByte(buf[0]));
+            return Err(SpiError::UnexpectedReplyByte(buf[0], 0));
         }
 
         // Make sure the WifiNina is responding to the correct command
         if buf[1] != u8::from(command) | REPLY_FLAG {
-            return Err(SpiError::UnexpectedReplyByte(buf[1]));
+            return Err(SpiError::UnexpectedReplyByte(buf[1], 1));
         }
 
         // Parse the response
@@ -152,7 +152,7 @@ where
 
         // Ensure the WifiNina is finished
         if buf[2 + len] != END_CMD {
-            return Err(SpiError::UnexpectedReplyByte(buf[2 + len]));
+            return Err(SpiError::UnexpectedReplyByte(buf[2 + len], 2));
         }
 
         Ok(())
