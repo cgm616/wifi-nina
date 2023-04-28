@@ -135,3 +135,62 @@ where
         cursor
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn serialize_and_parse_five_tuple(params: (u8, u8, u8, u8, u8)) {
+            prop_assert_eq!(params.len(false), 11);
+            let mut buf: [u8; 11] = [0; 11];
+
+            let serialized_len = params.serialize(&mut buf, false);
+            prop_assert_eq!(serialized_len, 11);
+
+            let expected = [5, 1, params.0, 1, params.1, 1, params.2, 1, params.3, 1, params.4];
+            prop_assert_eq!(buf.as_slice(), &expected);
+
+            let mut parsed = (0, 0, 0, 0, 0);
+            let parsed_len = parsed.parse(&buf, false);
+            prop_assert_eq!(parsed_len, serialized_len);
+
+            prop_assert_eq!(parsed, params);
+        }
+
+        #[test]
+        fn serialize_and_parse_heterogenous_tuple(first: u8, ref second in proptest::collection::vec(any::<u8>(), 0..=16)) {
+            let mut buf: [u8; 20] = [0; 20];
+
+            let mut arrayvec = ArrayVec::<u8, 16>::new();
+            arrayvec.try_extend_from_slice(second.as_slice()).unwrap();
+            let params = (first, arrayvec);
+            let serialized_len = params.serialize(&mut buf, false);
+
+            let mut parsed = (0, ArrayVec::<u8, 16>::new());
+            let parsed_len = parsed.parse(&buf, false);
+            prop_assert_eq!(parsed_len, serialized_len);
+
+            prop_assert_eq!(parsed, params);
+        }
+
+        #[test]
+        fn serialize_and_parse_arrayvec(params in proptest::collection::vec(any::<u32>(), 0..=16)) {
+            use crate::param::Scalar;
+
+            let mut buf: [u8; 81] = [0; 81];
+
+            let mut arrayvec = ArrayVec::<Scalar<byteorder::BigEndian, u32>, 16>::new();
+            arrayvec.extend(params.iter().cloned().map(Scalar::be));
+            let serialized_len = arrayvec.serialize(&mut buf, false);
+
+            let mut parsed = ArrayVec::<Scalar<byteorder::BigEndian, u32>, 16>::new();
+            let parsed_len = parsed.parse(&buf, false);
+            prop_assert_eq!(parsed_len, serialized_len);
+
+            prop_assert_eq!(parsed, arrayvec);
+        }
+    }
+}

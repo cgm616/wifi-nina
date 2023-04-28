@@ -122,7 +122,7 @@ where
 {
     fn parse(&mut self, buf: &[u8], len: usize) -> usize {
         assert_eq!(2, len);
-        self.value = O::read_u16(&buf);
+        self.value = O::read_u16(buf);
         2
     }
 }
@@ -147,7 +147,7 @@ where
 {
     fn parse(&mut self, buf: &[u8], len: usize) -> usize {
         assert_eq!(4, len);
-        self.value = O::read_u32(&buf);
+        self.value = O::read_u32(buf);
         4
     }
 }
@@ -159,7 +159,7 @@ impl SendParam for [u8] {
 
     fn serialize(&self, buf: &mut [u8]) -> usize {
         assert!(self.len() <= buf.len());
-        (&mut buf[..self.len()]).copy_from_slice(self);
+        buf[..self.len()].copy_from_slice(self);
         self.len()
     }
 }
@@ -171,7 +171,7 @@ impl<const CAP: usize> SendParam for ArrayVec<u8, CAP> {
 
     fn serialize(&self, buf: &mut [u8]) -> usize {
         assert!(self.len() <= buf.len());
-        (&mut buf[..self.len()]).copy_from_slice(self.as_slice());
+        buf[..self.len()].copy_from_slice(self.as_slice());
         self.len()
     }
 }
@@ -273,5 +273,151 @@ impl<O, A> core::ops::Deref for Scalar<O, A> {
 impl<O, A> core::ops::DerefMut for Scalar<O, A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.value
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn serialize_and_parse_u8(byte: u8) {
+            let mut buf: [u8; 1] = [0; 1];
+
+            let len_serialized = byte.serialize(&mut buf);
+            prop_assert_eq!(1, len_serialized);
+
+            prop_assert_eq!(buf[0], byte);
+
+            let mut parsed = 0_u8;
+            let len_parsed = parsed.parse(&buf, len_serialized);
+            prop_assert_eq!(1, len_parsed);
+
+            prop_assert_eq!(parsed, byte);
+        }
+
+        #[test]
+        fn serialize_and_parse_u8_with_length(byte: u8) {
+            let mut buf: [u8; 2] = [0; 2];
+
+            let len_serialized = byte.serialize_length_delimited(&mut buf, false);
+            prop_assert_eq!(2, len_serialized);
+
+            prop_assert_eq!(buf[0], 1);
+            prop_assert_eq!(buf[1], byte);
+
+            let mut parsed = 0_u8;
+            let len_parsed = parsed.parse_length_delimited(&buf, false);
+            prop_assert_eq!(2, len_parsed);
+
+            prop_assert_eq!(parsed, byte);
+        }
+
+        #[test]
+        fn serialize_and_parse_bytes_with_length(ref bytes in proptest::collection::vec(any::<u8>(), 0..=127)) {
+            let mut buf: [u8; 128] = [0; 128];
+
+            let len_serialized = bytes.as_slice().serialize_length_delimited(&mut buf, false);
+            prop_assert_eq!(bytes.len() + 1, len_serialized);
+
+            prop_assert_eq!(buf[0] as usize, bytes.len());
+
+            let mut parsed = ArrayVec::<u8, 127>::new();
+            let len_parsed = parsed.parse_length_delimited(&buf, false);
+            prop_assert_eq!(len_serialized, len_parsed);
+
+            prop_assert_eq!(parsed.as_slice(), bytes.as_slice());
+        }
+
+        #[test]
+        fn serialize_and_parse_arrayvec_with_length(ref bytes in proptest::collection::vec(any::<u8>(), 0..=127)) {
+            let mut buf: [u8; 128] = [0; 128];
+
+            let mut arrayvec = ArrayVec::<u8, 127>::new();
+            arrayvec.try_extend_from_slice(bytes.as_slice()).unwrap();
+            let len_serialized = arrayvec.serialize_length_delimited(&mut buf, false);
+            prop_assert_eq!(bytes.len() + 1, len_serialized);
+
+            prop_assert_eq!(buf[0] as usize, bytes.len());
+
+            let mut parsed = ArrayVec::<u8, 127>::new();
+            let len_parsed = parsed.parse_length_delimited(&buf, false);
+            prop_assert_eq!(len_serialized, len_parsed);
+
+            prop_assert_eq!(parsed.as_slice(), arrayvec.as_slice());
+        }
+
+        #[test]
+        fn serialize_and_parse_nullterminated_with_length(ref bytes in proptest::collection::vec(any::<u8>(), 0..=8)) {
+            let mut buf: [u8; 10] = [0; 10];
+
+            let mut arrayvec = ArrayVec::<u8, 8>::new();
+            arrayvec.try_extend_from_slice(bytes.as_slice()).unwrap();
+            let null_terminated = NullTerminated(arrayvec);
+
+            let len_serialized = null_terminated.serialize_length_delimited(&mut buf, false);
+            prop_assert_eq!(len_serialized, bytes.len() + 2);
+
+            prop_assert_eq!(buf[0] as usize, bytes.len() + 1);
+            prop_assert_eq!(buf[9], 0);
+
+            let mut parsed = NullTerminated(ArrayVec::<u8, 8>::new());
+            let len_parsed = parsed.parse_length_delimited(&buf, false);
+            prop_assert_eq!(len_serialized, len_parsed);
+
+            prop_assert_eq!(parsed.as_slice(), null_terminated.as_slice());
+        }
+
+        #[test]
+        fn serialize_and_parse_scalar_u16(scalar: u16) {
+            let mut buf: [u8; 2] = [0; 2];
+
+            let be = Scalar::be(scalar);
+            let len_serialized = be.serialize(&mut buf);
+            prop_assert_eq!(2, len_serialized);
+
+            let mut parsed = Scalar::be(0);
+            let len_parsed = parsed.parse(&buf, len_serialized);
+            prop_assert_eq!(2, len_parsed);
+
+            prop_assert_eq!(*parsed, scalar);
+
+            let le = Scalar::le(scalar);
+            let len_serialized = le.serialize(&mut buf);
+            prop_assert_eq!(2, len_serialized);
+
+            let mut parsed = Scalar::le(0);
+            let len_parsed = parsed.parse(&buf, len_serialized);
+            prop_assert_eq!(2, len_parsed);
+
+            prop_assert_eq!(*parsed, scalar);
+        }
+
+        #[test]
+        fn serialize_and_parse_scalar_u32(scalar: u32) {
+            let mut buf: [u8; 4] = [0; 4];
+
+            let be = Scalar::be(scalar);
+            let len_serialized = be.serialize(&mut buf);
+            prop_assert_eq!(4, len_serialized);
+
+            let mut parsed = Scalar::be(0);
+            let len_parsed = parsed.parse(&buf, len_serialized);
+            prop_assert_eq!(4, len_parsed);
+
+            prop_assert_eq!(*parsed, scalar);
+
+            let le = Scalar::le(scalar);
+            let len_serialized = le.serialize(&mut buf);
+            prop_assert_eq!(4, len_serialized);
+
+            let mut parsed = Scalar::le(0);
+            let len_parsed = parsed.parse(&buf, len_serialized);
+            prop_assert_eq!(4, len_parsed);
+
+            prop_assert_eq!(*parsed, scalar);
+        }
     }
 }

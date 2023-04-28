@@ -26,3 +26,6 @@ default = []
 # reset-high inverts the reset logic to go to high and then low instead of low and then high
 # this is needed on the Arduino MKR WiFi 1010 for example
 reset-high = []
+
+[dev-dependencies]
+proptest = "1.1.0"
