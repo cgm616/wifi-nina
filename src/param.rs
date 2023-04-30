@@ -168,7 +168,7 @@ impl SerializeParam for [u8] {
     }
 
     async fn serialize<T: Transporter>(&self, trans: &mut T) -> Result<(), T::Error> {
-        trans.write_from(&self).await
+        trans.write_from(self).await
     }
 }
 

@@ -157,6 +157,7 @@ where
         self.cursor = 0;
     }
 
+    #[allow(clippy::wrong_self_convention)]
     async fn to_reader(
         &mut self,
     ) -> Result<(), SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>> {
