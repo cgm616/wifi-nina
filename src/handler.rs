@@ -739,8 +739,8 @@ impl<T: Transport> Handler<T> {
         recv_params: &mut RP,
     ) -> Result<(), error::Error<T::Error>>
     where
-        SP: params::SendParams + fmt::Debug,
-        RP: params::RecvParams + fmt::Debug,
+        SP: params::SerializeParams + fmt::Debug,
+        RP: params::ParseParams + fmt::Debug,
     {
         self.transport
             .handle_cmd(command, send_params, recv_params, false, false)
@@ -755,8 +755,8 @@ impl<T: Transport> Handler<T> {
         recv_params: &mut RP,
     ) -> Result<(), error::Error<T::Error>>
     where
-        SP: params::SendParams + fmt::Debug,
-        RP: params::RecvParams + fmt::Debug,
+        SP: params::SerializeParams + fmt::Debug,
+        RP: params::ParseParams + fmt::Debug,
     {
         self.transport
             .handle_cmd(command, send_params, recv_params, true, false)
@@ -771,8 +771,8 @@ impl<T: Transport> Handler<T> {
         recv_params: &mut RP,
     ) -> Result<(), error::Error<T::Error>>
     where
-        SP: params::SendParams + fmt::Debug,
-        RP: params::RecvParams + fmt::Debug,
+        SP: params::SerializeParams + fmt::Debug,
+        RP: params::ParseParams + fmt::Debug,
     {
         self.transport
             .handle_cmd(command, send_params, recv_params, true, true)

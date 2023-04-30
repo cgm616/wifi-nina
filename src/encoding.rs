@@ -1,27 +1,40 @@
 //! Utilities to receive and send over SPI.
 
-use core::convert::TryFrom;
-
 use byteorder::ByteOrder as _;
 
-/// Read either a u8 or a u16 length from a buffer and return the length and how many bytes were read
-pub(crate) fn parse_len(buf: &[u8], long: bool) -> (usize, usize) {
+use core::convert::TryFrom;
+
+use crate::transport::Transporter;
+
+/// Read either a u8 or a u16 length from a `Transporter` and return the length
+pub(crate) async fn parse_len<T: Transporter>(
+    trans: &mut T,
+    long: bool,
+) -> Result<usize, T::Error> {
     if long {
-        (byteorder::BigEndian::read_u16(&buf[..2]) as usize, 2)
+        let mut buf = [0; 2];
+        trans.read_into(&mut buf).await?;
+        Ok(byteorder::BigEndian::read_u16(&buf) as usize)
     } else {
-        (buf[0] as usize, 1)
+        Ok(trans.read().await?.into())
     }
 }
 
-/// Serialize either a u8 or a u16 length to a buffer and return how many bytes were written
-pub(crate) fn serialize_len(buf: &mut [u8], long: bool, len: usize) -> usize {
+/// Serialize either a u8 or a u16 length to a `Transporter`
+pub(crate) async fn serialize_len<T: Transporter>(
+    trans: &mut T,
+    long: bool,
+    len: usize,
+) -> Result<(), T::Error> {
     if long {
         let len = u16::try_from(len).unwrap();
-        byteorder::BigEndian::write_u16(&mut buf[..2], len);
-        2
+        let mut buf = [0; 2];
+        byteorder::BigEndian::write_u16(&mut buf, len);
+        trans.write_from(&buf).await?;
     } else {
         let len = u8::try_from(len).unwrap();
-        buf[0] = len;
-        1
+        trans.write(len).await?;
     }
+
+    Ok(())
 }

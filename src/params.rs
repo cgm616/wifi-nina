@@ -1,37 +1,38 @@
 use arrayvec::ArrayVec;
 
+use crate::transport::Transporter;
+
 use super::param;
 
 /// A collection of parameters that can be sent to the WifiNina
-pub trait SendParams {
+pub trait SerializeParams {
     /// Return the length, in bytes, of sending the parameters
     fn len(&self, long: bool) -> usize;
 
-    /// Serialize the parameters into the provided buffer, returning the length written
-    fn serialize(&self, buf: &mut [u8], long: bool) -> usize;
+    /// Serialize the parameters into a `Transporter`
+    async fn serialize<T: Transporter>(&self, trans: &mut T, long: bool) -> Result<(), T::Error>;
 }
 
 /// A collection of parameters that can be received from the WifiNina
-pub trait RecvParams {
-    /// Parse the parameters from the contents of a buffer
-    fn parse(&mut self, buf: &[u8], long: bool) -> usize;
+pub trait ParseParams {
+    /// Parse the parameters from a `Transporter`
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, long: bool) -> Result<(), T::Error>;
 }
 
-impl SendParams for () {
+impl SerializeParams for () {
     fn len(&self, _long: bool) -> usize {
         1
     }
 
-    fn serialize(&self, buf: &mut [u8], _long: bool) -> usize {
-        buf[0] = 0;
-        1
+    async fn serialize<T: Transporter>(&self, trans: &mut T, _long: bool) -> Result<(), T::Error> {
+        trans.write(0).await
     }
 }
 
-impl RecvParams for () {
-    fn parse(&mut self, buf: &[u8], _long: bool) -> usize {
-        assert_eq!(0, buf[0]);
-        1
+impl ParseParams for () {
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, _long: bool) -> Result<(), T::Error> {
+        assert_eq!(0, trans.read().await?);
+        Ok(())
     }
 }
 
@@ -42,10 +43,10 @@ macro_rules! count {
 
 macro_rules! tuple_impls {
     ( $head:ident, $( $tail:ident, )* ) => {
-        impl<$head, $( $tail ),*> SendParams for ($head, $( $tail ),*)
+        impl<$head, $( $tail ),*> SerializeParams for ($head, $( $tail ),*)
         where
-            $head: param::SendParam,
-            $( $tail: param::SendParam ),*
+            $head: param::SerializeParam,
+            $( $tail: param::SerializeParam ),*
         {
             fn len(&self, long: bool) -> usize {
                 #[allow(non_snake_case)]
@@ -53,38 +54,35 @@ macro_rules! tuple_impls {
                 1 + $head.len_length_delimited(long) $(+ $tail.len_length_delimited(long) )*
             }
 
-            fn serialize(&self, buf: &mut [u8], long: bool) -> usize {
+            async fn serialize<T: Transporter>(&self, trans: &mut T, long: bool) -> Result<(), T::Error> {
                 #[allow(non_snake_case)]
                 let ($head, $( $tail ),*) = self;
                 let num = count!($head $( $tail )*);
-                buf[0] = num;
-                let mut len = 1;
-                len = len + $head.serialize_length_delimited(&mut buf[len..], long);
+                trans.write(num).await?;
+                $head.serialize_length_delimited(trans, long).await?;
                 $(
-                    len = len + $tail.serialize_length_delimited(&mut buf[len..], long);
+                    $tail.serialize_length_delimited(trans, long).await?;
                 )*
-                len
+                Ok(())
             }
         }
 
-        impl<$head, $( $tail ),*> RecvParams for ($head, $( $tail ),*)
+        impl<$head, $( $tail ),*> ParseParams for ($head, $( $tail ),*)
         where
-            $head: param::RecvParam,
-            $( $tail: param::RecvParam ),*
+            $head: param::ParseParam,
+            $( $tail: param::ParseParam ),*
         {
-            fn parse(&mut self, buf: &[u8], long: bool) -> usize
+            async fn parse<T: Transporter>(&mut self, trans: &mut T, long: bool) -> Result<(), T::Error>
             {
                 #[allow(non_snake_case)]
                 let ($head, $( $tail ),*) = self;
                 let num = count!($head $( $tail )*);
-
-                assert_eq!(num, buf[0]);
-                let mut len = 1;
-                len = len + $head.parse_length_delimited(&buf[len..], long);
+                assert_eq!(num, trans.read().await?);
+                $head.parse_length_delimited(trans, long).await?;
                 $(
-                    len = len + $tail.parse_length_delimited(&buf[len..], long);
+                    $tail.parse_length_delimited(trans, long).await?;
                 )*
-                len
+                Ok(())
             }
         }
 
@@ -96,9 +94,9 @@ macro_rules! tuple_impls {
 
 tuple_impls!(A, B, C, D, E,);
 
-impl<T, const CAP: usize> SendParams for ArrayVec<T, CAP>
+impl<U, const CAP: usize> SerializeParams for ArrayVec<U, CAP>
 where
-    T: param::SendParam,
+    U: param::SerializeParam,
 {
     fn len(&self, long: bool) -> usize {
         1 + self
@@ -107,32 +105,30 @@ where
             .sum::<usize>()
     }
 
-    fn serialize(&self, buf: &mut [u8], long: bool) -> usize {
+    async fn serialize<T: Transporter>(&self, trans: &mut T, long: bool) -> Result<(), T::Error> {
         use core::convert::TryFrom;
 
         let len = u8::try_from(self.len()).unwrap(); // TODO:: do we really want to unwrap?
-        buf[0] = len;
-        let mut cursor = 1;
+        trans.write(len).await?;
         for item in self.iter() {
-            cursor = cursor + item.serialize_length_delimited(&mut buf[cursor..], long);
+            item.serialize_length_delimited(trans, long).await?;
         }
-        cursor
+        Ok(())
     }
 }
 
-impl<T, const CAP: usize> RecvParams for arrayvec::ArrayVec<T, CAP>
+impl<U, const CAP: usize> ParseParams for arrayvec::ArrayVec<U, CAP>
 where
-    T: param::RecvParam + Default,
+    U: param::ParseParam + Default,
 {
-    fn parse(&mut self, buf: &[u8], long: bool) -> usize {
-        let items = buf[0];
-        let mut cursor = 1;
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, long: bool) -> Result<(), T::Error> {
+        let items = trans.read().await?;
         for _ in 0..items {
-            let mut item: T = Default::default();
-            cursor = cursor + item.parse_length_delimited(&buf[cursor..], long);
+            let mut item: U = Default::default();
+            item.parse_length_delimited(trans, long).await?;
             self.push(item);
         }
-        cursor
+        Ok(())
     }
 }
 

@@ -11,6 +11,7 @@ mod error;
 mod handler;
 mod param;
 mod params;
+mod util;
 
 use arrayvec::ArrayVec;
 use embedded_hal_async::delay::DelayUs;
