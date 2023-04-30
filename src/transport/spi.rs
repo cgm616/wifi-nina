@@ -29,6 +29,41 @@ pub struct BufTransporter<'a, const CAPACITY: usize, SPI: 'a, CS: 'a, BUSY: 'a, 
     spi: &'a mut SpiTransport<SPI, CS, BUSY, RESET>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum SpiError<SPI, CS, BUSY, RESET> {
+    Spi(SPI),
+    Cs(CS),
+    Busy(BUSY),
+    Reset(RESET),
+    Delay,
+    Timeout,
+    ErrorResponse,
+    BufferFull,
+    UnexpectedReplyByte(u8, u8),
+}
+
+impl<SPI, CS, BUSY, RESET> Debug for SpiError<SPI, CS, BUSY, RESET> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Spi(_) => write!(f, "SPI"),
+            Self::Cs(_) => write!(f, "CS"),
+            Self::Busy(_) => write!(f, "BUSY"),
+            Self::Reset(_) => write!(f, "WRITE"),
+            Self::Delay => write!(f, "DELAY"),
+            Self::Timeout => write!(f, "Timeout"),
+            Self::ErrorResponse => write!(f, "ErrResp"),
+            Self::BufferFull => write!(f, "BufferFull"),
+            Self::UnexpectedReplyByte(b, loc) => write!(f, "URB: 0x{b:02x} at {loc}"),
+        }
+    }
+}
+
+impl<SPI, CS, BUSY, RESET> EioError for SpiError<SPI, CS, BUSY, RESET> {
+    fn kind(&self) -> embedded_io::ErrorKind {
+        embedded_io::ErrorKind::Other
+    }
+}
+
 impl<'a, const CAPACITY: usize, SPI, CS, BUSY, RESET> Transporter
     for BufTransporter<'a, CAPACITY, SPI, CS, BUSY, RESET>
 where
@@ -57,7 +92,9 @@ where
             self.flush().await?;
         }
 
+        // Save the byte and increment the cursor
         self.buffer[self.cursor] = byte;
+        self.cursor += 1;
         Ok(())
     }
 
@@ -120,6 +157,13 @@ where
         self.cursor = 0;
     }
 
+    async fn to_reader(
+        &mut self,
+    ) -> Result<(), SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>> {
+        self.clear();
+        self.refill().await
+    }
+
     async fn refill(
         &mut self,
     ) -> Result<(), SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>> {
@@ -152,41 +196,6 @@ where
         self.spi.cs.set_high().map_err(SpiError::Cs)?;
 
         Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum SpiError<SPI, CS, BUSY, RESET> {
-    Spi(SPI),
-    Cs(CS),
-    Busy(BUSY),
-    Reset(RESET),
-    Delay,
-    Timeout,
-    ErrorResponse,
-    BufferFull,
-    UnexpectedReplyByte(u8, u8),
-}
-
-impl<SPI, CS, BUSY, RESET> Debug for SpiError<SPI, CS, BUSY, RESET> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Spi(_) => write!(f, "SPI"),
-            Self::Cs(_) => write!(f, "CS"),
-            Self::Busy(_) => write!(f, "BUSY"),
-            Self::Reset(_) => write!(f, "WRITE"),
-            Self::Delay => write!(f, "DELAY"),
-            Self::Timeout => write!(f, "Timeout"),
-            Self::ErrorResponse => write!(f, "ErrResp"),
-            Self::BufferFull => write!(f, "BufferFull"),
-            Self::UnexpectedReplyByte(b, loc) => write!(f, "URB: 0x{b:02x} at {loc}"),
-        }
-    }
-}
-
-impl<SPI, CS, BUSY, RESET> EioError for SpiError<SPI, CS, BUSY, RESET> {
-    fn kind(&self) -> embedded_io::ErrorKind {
-        embedded_io::ErrorKind::Other
     }
 }
 
@@ -252,7 +261,7 @@ where
 
         // ----- SECOND PART: RECEIVING -----
 
-        trans.clear();
+        trans.to_reader().await?;
 
         let mut first = [0; 2];
         trans.read_into(&mut first).await?;
