@@ -13,7 +13,7 @@ use embedded_hal_async::{
 };
 use embedded_io::Error as EioError;
 
-use core::{fmt, fmt::Debug, future::Future};
+use core::{cell::RefCell, fmt, fmt::Debug, future::Future};
 
 use crate::{
     command, params,
@@ -39,13 +39,20 @@ pub struct SpiTransport<SPI, CS, BUSY, RESET> {
 }
 
 /// A [`Transporter`] that buffers reads and writes to the SPI bus
-pub struct BufTransporter<'a, const CAPACITY: usize, SPI: 'a, CS: 'a, BUSY: 'a, RESET: 'a> {
+pub struct BufTransporter<
+    'a,
+    const CAPACITY: usize,
+    SPI: 'a + SpiBus + SpiBusFlush,
+    CS: 'a + OutputPin,
+    BUSY: 'a + Wait + InputPin,
+    RESET: 'a + OutputPin,
+> {
     buffer: [u8; CAPACITY],
     cursor: usize, // should never be more than CAPACITY or length
-    spi: &'a mut SpiTransport<SPI, CS, BUSY, RESET>,
+    spi: RefCell<&'a mut SpiTransport<SPI, CS, BUSY, RESET>>,
 }
 
-/// An error thrown by [`SpiTransport`] and [`BufTransporter`]
+/// An error thrown by [`SpiTransport`]
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum SpiError<SPI, CS, BUSY, RESET> {
     /// An error from the SPI bus
@@ -149,19 +156,8 @@ where
         Ok(Self {
             buffer: [0; CAPACITY],
             cursor: 0,
-            spi,
+            spi: RefCell::new(spi),
         })
-    }
-
-    /// Destroy this `BufTransporter` and end its SPI transaction
-    async fn cleanup(self) -> Result<(), <Self as Transporter>::Error> {
-        // Flush bus
-        self.spi.spi.flush().await.map_err(SpiError::Spi)?;
-
-        // Deassert chip select
-        self.spi.cs.set_high().map_err(SpiError::Cs)?;
-
-        Ok(())
     }
 
     /// Clear the internal state
@@ -178,12 +174,17 @@ where
             self.cursor += 1;
         }
 
-        // Send the data in the buffer
-        self.spi
-            .spi
-            .transfer_in_place(&mut self.buffer[0..self.cursor])
-            .await
-            .map_err(SpiError::Spi)?;
+        {
+            let spi = &mut self.spi.borrow_mut().spi;
+
+            // Send the data in the buffer
+            spi.transfer_in_place(&mut self.buffer[0..self.cursor])
+                .await
+                .map_err(SpiError::Spi)?;
+
+            // Flush the transport layer
+            spi.flush().await.map_err(SpiError::Spi)?;
+        }
 
         self.clear();
         Ok(())
@@ -195,12 +196,26 @@ where
 
         // Fill the buffer
         self.spi
+            .borrow_mut()
             .spi
             .transfer_in_place(&mut self.buffer)
             .await
             .map_err(SpiError::Spi)?;
 
         Ok(())
+    }
+}
+
+impl<'a, const CAPACITY: usize, SPI, CS, BUSY, RESET> Drop
+    for BufTransporter<'a, CAPACITY, SPI, CS, BUSY, RESET>
+where
+    SPI: SpiBus + SpiBusFlush,
+    CS: OutputPin,
+    BUSY: Wait + InputPin,
+    RESET: OutputPin,
+{
+    fn drop(&mut self) {
+        self.spi.borrow_mut().cs.set_high();
     }
 }
 
@@ -252,7 +267,7 @@ where
     {
         // ----- FIRST PART: SENDING -----
 
-        self.transaction::<'_, '_, 16, _, _>(|mut trans| async move {
+        self.transaction::<'_, '_, 8, _, _>(|mut trans| async move {
             trans.write(START_CMD).await?;
             trans.write(u8::from(command) & !REPLY_FLAG).await?;
 
@@ -262,13 +277,15 @@ where
 
             trans.flush().await?;
 
-            Ok(trans)
+            Ok(())
         })
         .await?;
 
         // ----- SECOND PART: RECEIVING -----
 
-        self.transaction::<'_, '_, 16, _, _>(|mut trans| async move {
+        self.transaction::<'_, '_, 8, _, _>(|mut trans| async move {
+            trans.refill().await?;
+
             let mut first = [0; 2];
             trans.read_into(&mut first).await?;
 
@@ -293,7 +310,7 @@ where
                 return Err(SpiError::UnexpectedReplyByte(last, 2));
             }
 
-            Ok(trans)
+            Ok(())
         })
         .await?;
 
@@ -340,17 +357,11 @@ where
     ) -> Result<(), SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>>
     where
         F: (FnOnce(BufTransporter<'inner, CAPACITY, SPI, CS, BUSY, RESET>) -> Fut) + 'trans,
-        Fut: Future<
-                Output = Result<
-                    BufTransporter<'inner, CAPACITY, SPI, CS, BUSY, RESET>,
-                    SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>,
-                >,
-            > + 'inner,
+        Fut: Future<Output = Result<(), SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>>>
+            + 'inner,
     {
-        let mut trans: BufTransporter<CAPACITY, _, _, _, _> = BufTransporter::new(self).await?;
+        let trans: BufTransporter<CAPACITY, _, _, _, _> = BufTransporter::new(self).await?;
 
-        trans = f(trans).await?;
-
-        trans.cleanup().await
+        f(trans).await
     }
 }
