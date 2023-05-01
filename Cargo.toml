@@ -28,4 +28,5 @@ default = []
 reset-high = []
 
 [dev-dependencies]
+futures = { version = "0.3.28", features = ["executor"] }
 proptest = "1.1.0"

@@ -8,7 +8,7 @@ use embedded_hal_async::{
 };
 use embedded_io::Error as EioError;
 
-use core::{fmt, fmt::Debug};
+use core::{fmt, fmt::Debug, future::Future};
 
 use crate::{
     command, params,
@@ -97,43 +97,6 @@ where
         self.cursor += 1;
         Ok(())
     }
-
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        // Pad the buffer to a multiple of four
-        while self.cursor % 4 != 0 {
-            self.buffer[self.cursor] = 0xFF;
-            self.cursor += 1;
-        }
-
-        // Wait until the WifiNina is ready to receive
-        self.spi.busy.wait_for_low().await.map_err(SpiError::Busy)?;
-
-        // Assert chip select
-        self.spi.cs.set_low().map_err(SpiError::Cs)?;
-
-        // Wait until the WifiNina is ready to receive
-        self.spi
-            .busy
-            .wait_for_high()
-            .await
-            .map_err(SpiError::Busy)?;
-
-        // Send the data in the buffer
-        self.spi
-            .spi
-            .transfer_in_place(&mut self.buffer[0..self.cursor])
-            .await
-            .map_err(SpiError::Spi)?;
-
-        // Flush bus
-        self.spi.spi.flush().await.map_err(SpiError::Spi)?;
-
-        // Deassert chip select
-        self.spi.cs.set_high().map_err(SpiError::Cs)?;
-
-        self.clear();
-        Ok(())
-    }
 }
 
 impl<'a, const CAPACITY: usize, SPI, CS, BUSY, RESET>
@@ -144,12 +107,35 @@ where
     BUSY: Wait + InputPin,
     RESET: OutputPin,
 {
-    fn new(spi: &'a mut SpiTransport<SPI, CS, BUSY, RESET>) -> Self {
-        Self {
+    // type Error = <Self as Transporter>::Error;
+
+    async fn new(
+        spi: &'a mut SpiTransport<SPI, CS, BUSY, RESET>,
+    ) -> Result<Self, <Self as Transporter>::Error> {
+        // Wait until the WifiNina is ready to receive
+        spi.busy.wait_for_low().await.map_err(SpiError::Busy)?;
+
+        // Assert chip select
+        spi.cs.set_low().map_err(SpiError::Cs)?;
+
+        // Wait until the WifiNina is ready to receive
+        spi.busy.wait_for_high().await.map_err(SpiError::Busy)?;
+
+        Ok(Self {
             buffer: [0; CAPACITY],
             cursor: 0,
             spi,
-        }
+        })
+    }
+
+    async fn cleanup(self) -> Result<(), <Self as Transporter>::Error> {
+        // Flush bus
+        self.spi.spi.flush().await.map_err(SpiError::Spi)?;
+
+        // Deassert chip select
+        self.spi.cs.set_high().map_err(SpiError::Cs)?;
+
+        Ok(())
     }
 
     fn clear(&mut self) {
@@ -157,31 +143,26 @@ where
         self.cursor = 0;
     }
 
-    #[allow(clippy::wrong_self_convention)]
-    async fn to_reader(
-        &mut self,
-    ) -> Result<(), SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>> {
+    async fn flush(&mut self) -> Result<(), <Self as Transporter>::Error> {
+        // Pad the buffer to a multiple of four
+        while self.cursor % 4 != 0 {
+            self.buffer[self.cursor] = 0xFF;
+            self.cursor += 1;
+        }
+
+        // Send the data in the buffer
+        self.spi
+            .spi
+            .transfer_in_place(&mut self.buffer[0..self.cursor])
+            .await
+            .map_err(SpiError::Spi)?;
+
         self.clear();
-        self.refill().await
+        Ok(())
     }
 
-    async fn refill(
-        &mut self,
-    ) -> Result<(), SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>> {
+    async fn refill(&mut self) -> Result<(), <Self as Transporter>::Error> {
         self.clear();
-
-        // Wait until the WifiNina is ready to respond
-        self.spi.busy.wait_for_low().await.map_err(SpiError::Busy)?;
-
-        // Assert chip select
-        self.spi.cs.set_low().map_err(SpiError::Cs)?;
-
-        // Wait until the WifiNina is ready to respond
-        self.spi
-            .busy
-            .wait_for_high()
-            .await
-            .map_err(SpiError::Busy)?;
 
         // Fill the buffer
         self.spi
@@ -189,12 +170,6 @@ where
             .transfer_in_place(&mut self.buffer)
             .await
             .map_err(SpiError::Spi)?;
-
-        // Flush bus
-        self.spi.spi.flush().await.map_err(SpiError::Spi)?;
-
-        // Deassert chip select
-        self.spi.cs.set_high().map_err(SpiError::Cs)?;
 
         Ok(())
     }
@@ -249,44 +224,52 @@ where
         SP: params::SerializeParams + fmt::Debug,
         RP: params::ParseParams + fmt::Debug,
     {
-        let mut trans: BufTransporter<16, _, _, _, _> = BufTransporter::new(self);
-
         // ----- FIRST PART: SENDING -----
 
-        trans.write(START_CMD).await?;
-        trans.write(u8::from(command) & !REPLY_FLAG).await?;
-        send_params.serialize(&mut trans, long_send).await?;
-        trans.write(END_CMD).await?;
+        self.transaction::<'_, '_, 16, _, _>(|mut trans| async move {
+            trans.write(START_CMD).await?;
+            trans.write(u8::from(command) & !REPLY_FLAG).await?;
 
-        trans.flush().await?;
+            send_params.serialize(&mut trans, long_send).await?;
+
+            trans.write(END_CMD).await?;
+
+            trans.flush().await?;
+
+            Ok(trans)
+        })
+        .await?;
 
         // ----- SECOND PART: RECEIVING -----
 
-        trans.to_reader().await?;
+        self.transaction::<'_, '_, 16, _, _>(|mut trans| async move {
+            let mut first = [0; 2];
+            trans.read_into(&mut first).await?;
 
-        let mut first = [0; 2];
-        trans.read_into(&mut first).await?;
+            // Make sure the first byte doesn't indicate an error
+            if first[0] == ERR_CMD {
+                return Err(SpiError::ErrorResponse);
+            } else if first[0] != START_CMD {
+                return Err(SpiError::UnexpectedReplyByte(first[0], 0));
+            }
 
-        // Make sure the first byte doesn't indicate an error
-        if first[0] == ERR_CMD {
-            return Err(SpiError::ErrorResponse);
-        } else if first[0] != START_CMD {
-            return Err(SpiError::UnexpectedReplyByte(first[0], 0));
-        }
+            // Make sure the WifiNina is responding to the correct command
+            if first[1] != u8::from(command) | REPLY_FLAG {
+                return Err(SpiError::UnexpectedReplyByte(first[1], 1));
+            }
 
-        // Make sure the WifiNina is responding to the correct command
-        if first[1] != u8::from(command) | REPLY_FLAG {
-            return Err(SpiError::UnexpectedReplyByte(first[1], 1));
-        }
+            // Receive and parse the response
+            recv_params.parse(&mut trans, long_recv).await?;
 
-        // Parse the response
-        recv_params.parse(&mut trans, long_recv).await?;
+            // Ensure the WifiNina is finished
+            let last = trans.read().await?;
+            if last != END_CMD {
+                return Err(SpiError::UnexpectedReplyByte(last, 2));
+            }
 
-        // Ensure the WifiNina is finished
-        let last = trans.read().await?;
-        if last != END_CMD {
-            return Err(SpiError::UnexpectedReplyByte(last, 2));
-        }
+            Ok(trans)
+        })
+        .await?;
 
         Ok(())
     }
@@ -317,5 +300,25 @@ where
         super::Transport::reset(&mut this, delay).await?;
 
         Ok(this)
+    }
+
+    async fn transaction<'trans: 'inner, 'inner, const CAPACITY: usize, F, Fut>(
+        &'trans mut self,
+        f: F,
+    ) -> Result<(), SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>>
+    where
+        F: (FnOnce(BufTransporter<'inner, CAPACITY, SPI, CS, BUSY, RESET>) -> Fut) + 'trans,
+        Fut: Future<
+                Output = Result<
+                    BufTransporter<'inner, CAPACITY, SPI, CS, BUSY, RESET>,
+                    SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>,
+                >,
+            > + 'inner,
+    {
+        let mut trans: BufTransporter<CAPACITY, _, _, _, _> = BufTransporter::new(self).await?;
+
+        trans = f(trans).await?;
+
+        trans.cleanup().await
     }
 }

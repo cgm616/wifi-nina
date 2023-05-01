@@ -63,7 +63,4 @@ pub trait Transporter {
         }
         Ok(())
     }
-
-    /// Flush the transport layer, ensuring any pending bytes are sent
-    async fn flush(&mut self) -> Result<(), Self::Error>;
 }

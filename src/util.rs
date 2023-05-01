@@ -11,36 +11,49 @@ pub(crate) mod test {
     }
 
     /// Errors produced by `MockTransporter`
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub(crate) enum MockError {
         BufferFull,
         NoMoreData,
     }
 
+    impl std::fmt::Display for MockError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self {
+                Self::BufferFull => write!(f, "the internal buffer is full"),
+                Self::NoMoreData => write!(f, "there is no more data to read"),
+            }
+        }
+    }
+
+    impl embedded_io::Error for MockError {
+        fn kind(&self) -> embedded_io::ErrorKind {
+            embedded_io::ErrorKind::Other
+        }
+    }
+
+    impl std::error::Error for MockError {}
+
     impl<const CAPACITY: usize> Transporter for MockTransporter<CAPACITY> {
         type Error = MockError;
 
         async fn read(&mut self) -> Result<u8, Self::Error> {
-            if cursor >= self.buffer.len() {
+            if self.cursor >= self.buffer.len() {
                 return Err(MockError::NoMoreData);
             }
 
-            cursor += 1;
-            Ok(self.buffer[cursor - 1])
+            self.cursor += 1;
+            Ok(self.buffer[self.cursor - 1])
         }
 
         async fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
-            if cursor >= self.buffer.len() {
+            if self.cursor >= self.buffer.len() {
                 return Err(MockError::BufferFull);
             }
 
-            self.buffer[cursor] = byte;
-            cursor += 1;
+            self.buffer[self.cursor] = byte;
+            self.cursor += 1;
 
-            Ok(())
-        }
-
-        async fn flush(&mut self) -> Result<(), Self::Error> {
-            // nothing to do
             Ok(())
         }
     }
@@ -67,4 +80,13 @@ pub(crate) mod test {
             self.cursor = 0;
         }
     }
+
+    /// Wrap a test in `futures::executor::block_on()`
+    macro_rules! async_test {
+        ( $($t:tt)* ) => {
+            futures::executor::block_on(async move { $( $t )* })?;
+        };
+    }
+
+    pub(crate) use async_test;
 }
