@@ -4,6 +4,12 @@
 //! [`SpiTransport`], that talks to the WifiNina over an SPI bus.
 
 #![allow(clippy::type_complexity)]
+// This lint is allowed because otherwise clippy complains about the RefCell borrow
+// inside BufTransporter being held across await points. However, from the
+// perspective of the BufTransporter (the only code that can access the cell)
+// that shouldn't matter; other async code may run, but none of it can touch
+// the RefCell or ask for a borrow.
+#![allow(clippy::await_holding_refcell_ref)]
 
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal_async::{
@@ -174,17 +180,21 @@ where
             self.cursor += 1;
         }
 
-        {
-            let spi = &mut self.spi.borrow_mut().spi;
+        // Send the data in the buffer
+        self.spi
+            .borrow_mut()
+            .spi
+            .transfer_in_place(&mut self.buffer[0..self.cursor])
+            .await
+            .map_err(SpiError::Spi)?;
 
-            // Send the data in the buffer
-            spi.transfer_in_place(&mut self.buffer[0..self.cursor])
-                .await
-                .map_err(SpiError::Spi)?;
-
-            // Flush the transport layer
-            spi.flush().await.map_err(SpiError::Spi)?;
-        }
+        // Flush the transport layer
+        self.spi
+            .borrow_mut()
+            .spi
+            .flush()
+            .await
+            .map_err(SpiError::Spi)?;
 
         self.clear();
         Ok(())
@@ -215,7 +225,7 @@ where
     RESET: OutputPin,
 {
     fn drop(&mut self) {
-        self.spi.borrow_mut().cs.set_high();
+        let _ = self.spi.borrow_mut().cs.set_high();
     }
 }
 
