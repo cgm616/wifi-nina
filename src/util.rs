@@ -1,19 +1,24 @@
-/// Utilities
-
+//! Utilities for internal use
+//!
 #[cfg(test)]
 pub(crate) mod test {
+    //! Utilities for use in testing this crate
+
     use crate::transport::Transporter;
 
-    /// A transporter for use in tests
+    /// A [`Transporter`] for use in tests
     pub(crate) struct MockTransporter<const CAPACITY: usize> {
         pub buffer: [u8; CAPACITY],
         cursor: usize,
     }
 
-    /// Errors produced by `MockTransporter`
+    /// Errors produced by [`MockTransporter`]
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
     pub(crate) enum MockError {
+        /// The internal buffer is full
         BufferFull,
+
+        /// There is no more data to read
         NoMoreData,
     }
 
@@ -59,7 +64,7 @@ pub(crate) mod test {
     }
 
     impl<const CAPACITY: usize> MockTransporter<CAPACITY> {
-        /// Create a new `MockTransporter`
+        /// Create a new [`MockTransporter`]
         pub fn new() -> Self {
             Self {
                 buffer: [0; CAPACITY],
@@ -69,7 +74,7 @@ pub(crate) mod test {
 
         /// Clear the buffer and internal state
         ///
-        /// The `MockTransporter` will be in the same state as a brand-new instance.
+        /// The [`MockTransporter`] will be in the same state as a brand-new instance.
         pub fn clear(&mut self) {
             self.buffer = [0; CAPACITY];
             self.cursor = 0;
@@ -81,7 +86,9 @@ pub(crate) mod test {
         }
     }
 
-    /// Wrap a test in `futures::executor::block_on()`
+    /// Wrap a test in [`futures::executor::block_on()`]
+    ///
+    /// This allows running `async` functions in tests.
     macro_rules! async_test {
         ( $($t:tt)* ) => {
             futures::executor::block_on(async move { $( $t )* })?;

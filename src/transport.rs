@@ -11,11 +11,14 @@ mod spi;
 pub use spi::SpiError;
 pub use spi::SpiTransport;
 
+/// A transport layer that can handle sending and receiving commands from the WifiNina
 pub trait Transport {
     type Error: EioError;
 
+    /// Reset the underlying transport layer, ensuring it is ready to handle commands
     async fn reset<DELAY: DelayUs>(&mut self, delay: DELAY) -> Result<(), Self::Error>;
 
+    /// Send a command via this transport layer
     async fn handle_cmd<SP, RP>(
         &mut self,
         command: command::Command,

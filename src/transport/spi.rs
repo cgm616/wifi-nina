@@ -1,3 +1,8 @@
+//! SPI-specific transport layer implementations
+//!
+//! This module provides an implementer of the [`Transport`] trait,
+//! [`SpiTransport`], that talks to the WifiNina over an SPI bus.
+
 #![allow(clippy::type_complexity)]
 
 use embedded_hal::digital::{InputPin, OutputPin};
@@ -15,6 +20,16 @@ use crate::{
     transport::{Transport, Transporter},
 };
 
+/// A SPI-specific transport layer
+///
+/// To communicate over SPI with the WifiNina, you must create an [`SpiTransport`]
+/// with four peripherals: an exclusive SPI bus, a chip-select output pin, a
+/// busy input pin, and a reset output pin.
+///
+/// This driver needs exclusive control over the bus because the WifiNina
+/// indicates if it is ready to receive bytes _after_ chip-select is asserted
+/// through the busy pin. That is, the driver needs to control chip-select
+/// in conjunction with reading the busy signal from the WifiNina.
 #[derive(Debug)]
 pub struct SpiTransport<SPI, CS, BUSY, RESET> {
     spi: SPI,
@@ -23,22 +38,35 @@ pub struct SpiTransport<SPI, CS, BUSY, RESET> {
     reset: RESET,
 }
 
+/// A [`Transporter`] that buffers reads and writes to the SPI bus
 pub struct BufTransporter<'a, const CAPACITY: usize, SPI: 'a, CS: 'a, BUSY: 'a, RESET: 'a> {
     buffer: [u8; CAPACITY],
     cursor: usize, // should never be more than CAPACITY or length
     spi: &'a mut SpiTransport<SPI, CS, BUSY, RESET>,
 }
 
+/// An error thrown by [`SpiTransport`] and [`BufTransporter`]
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum SpiError<SPI, CS, BUSY, RESET> {
+    /// An error from the SPI bus
     Spi(SPI),
+
+    // An error from the chip-select output
     Cs(CS),
+
+    /// An error from the busy input
     Busy(BUSY),
+
+    /// An error from the reset output
     Reset(RESET),
+
+    /// An error with the delay provided to [`SpiTransport::start()`]
     Delay,
-    Timeout,
+
+    /// The WifiNina indicated an error
     ErrorResponse,
-    BufferFull,
+
+    /// The transport layer received an unexpected byte
     UnexpectedReplyByte(u8, u8),
 }
 
@@ -50,9 +78,7 @@ impl<SPI, CS, BUSY, RESET> Debug for SpiError<SPI, CS, BUSY, RESET> {
             Self::Busy(_) => write!(f, "BUSY"),
             Self::Reset(_) => write!(f, "WRITE"),
             Self::Delay => write!(f, "DELAY"),
-            Self::Timeout => write!(f, "Timeout"),
             Self::ErrorResponse => write!(f, "ErrResp"),
-            Self::BufferFull => write!(f, "BufferFull"),
             Self::UnexpectedReplyByte(b, loc) => write!(f, "URB: 0x{b:02x} at {loc}"),
         }
     }
@@ -107,8 +133,7 @@ where
     BUSY: Wait + InputPin,
     RESET: OutputPin,
 {
-    // type Error = <Self as Transporter>::Error;
-
+    /// Create a new `BufTransporter`, opening a transaction on the SPI bus
     async fn new(
         spi: &'a mut SpiTransport<SPI, CS, BUSY, RESET>,
     ) -> Result<Self, <Self as Transporter>::Error> {
@@ -128,6 +153,7 @@ where
         })
     }
 
+    /// Destroy this `BufTransporter` and end its SPI transaction
     async fn cleanup(self) -> Result<(), <Self as Transporter>::Error> {
         // Flush bus
         self.spi.spi.flush().await.map_err(SpiError::Spi)?;
@@ -138,11 +164,13 @@ where
         Ok(())
     }
 
+    /// Clear the internal state
     fn clear(&mut self) {
         self.buffer = [0; CAPACITY];
         self.cursor = 0;
     }
 
+    /// Send the data in the buffer over the SPI bus
     async fn flush(&mut self) -> Result<(), <Self as Transporter>::Error> {
         // Pad the buffer to a multiple of four
         while self.cursor % 4 != 0 {
@@ -161,6 +189,7 @@ where
         Ok(())
     }
 
+    /// Refill the internal buffer with data from the SPI bus
     async fn refill(&mut self) -> Result<(), <Self as Transporter>::Error> {
         self.clear();
 
@@ -179,7 +208,6 @@ const START_CMD: u8 = 0xe0;
 const END_CMD: u8 = 0xee;
 const ERR_CMD: u8 = 0xef;
 const REPLY_FLAG: u8 = 1 << 7;
-// const WAIT_REPLY_TIMEOUT_BYTES: usize = 1000;
 
 impl<SPI, CS, BUSY, RESET> Transport for SpiTransport<SPI, CS, BUSY, RESET>
 where
@@ -190,7 +218,6 @@ where
 {
     type Error = SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>;
 
-    #[inline]
     async fn reset<DELAY: DelayUs>(&mut self, mut delay: DELAY) -> Result<(), Self::Error> {
         // self.cs.set_high().map_err(SpiError::Cs)?;
 
@@ -211,7 +238,6 @@ where
         Ok(())
     }
 
-    #[inline]
     async fn handle_cmd<SP, RP>(
         &mut self,
         command: command::Command,
@@ -282,7 +308,7 @@ where
     BUSY: Wait + InputPin,
     RESET: OutputPin,
 {
-    #[inline]
+    /// Set up the [`SpiTransport`] and take control of its peripherals
     pub async fn start<DELAY: DelayUs>(
         spi: SPI,
         cs: CS,
@@ -302,6 +328,12 @@ where
         Ok(this)
     }
 
+    /// Run a transaction on the transport layer
+    ///
+    /// This method accepts a closure with one argument, a [`BufTransporter`]
+    /// that uses this [`Transport`] to communicate over SPI with a WifiNina.
+    /// The closure must return this argument when it finishes to ensure that
+    /// the transaction is closed (i.e. chip-select is deasserted).
     async fn transaction<'trans: 'inner, 'inner, const CAPACITY: usize, F, Fut>(
         &'trans mut self,
         f: F,
