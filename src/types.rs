@@ -48,7 +48,7 @@ impl DerefMut for InternalSocket {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScannedNetwork {
-    pub ssid: arrayvec::ArrayVec<u8, 32>,
+    pub ssid: heapless::Vec<u8, 32>,
     pub rssi: i32,
     pub encryption_type: EncryptionType,
     pub bssid: [u8; 6],

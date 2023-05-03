@@ -1,4 +1,4 @@
-use arrayvec::ArrayVec;
+use heapless::Vec;
 
 use core::marker;
 
@@ -172,9 +172,9 @@ impl SerializeParam for [u8] {
     }
 }
 
-impl<const CAP: usize> SerializeParam for ArrayVec<u8, CAP> {
+impl<const CAP: usize> SerializeParam for Vec<u8, CAP> {
     fn len(&self) -> usize {
-        self.len()
+        self.as_slice().len()
     }
 
     async fn serialize<T: Transporter>(&self, trans: &mut T) -> Result<(), T::Error> {
@@ -191,13 +191,13 @@ impl ParseParam for &mut [u8] {
     }
 }
 
-impl<const CAP: usize> ParseParam for ArrayVec<u8, CAP> {
+impl<const CAP: usize> ParseParam for Vec<u8, CAP> {
     async fn parse<T: Transporter>(&mut self, trans: &mut T, len: usize) -> Result<(), T::Error> {
         if self.len() < len {
             // make space in the vector
             self.extend(core::iter::repeat(0).take(len - self.len()));
         }
-        self.as_mut_slice().parse(trans, len).await // fill it up
+        core::ops::DerefMut::deref_mut(self).parse(trans, len).await // fill it up
     }
 }
 
@@ -342,7 +342,7 @@ mod test {
 
                 trans.to_reader();
 
-                let mut parsed = ArrayVec::<u8, 127>::new();
+                let mut parsed = Vec::<u8, 127>::new();
                 parsed.parse_length_delimited(&mut trans, false).await?;
 
                 prop_assert_eq!(parsed.as_slice(), bytes.as_slice());
@@ -351,22 +351,22 @@ mod test {
         }
 
         #[test]
-        fn serialize_and_parse_arrayvec_with_length(ref bytes in proptest::collection::vec(any::<u8>(), 0..=127)) {
+        fn serialize_and_parse_vec_with_length(ref bytes in proptest::collection::vec(any::<u8>(), 0..=127)) {
             async_test! {
                 let mut trans: MockTransporter<128> = MockTransporter::new();
 
-                let mut arrayvec = ArrayVec::<u8, 127>::new();
-                arrayvec.try_extend_from_slice(bytes.as_slice()).unwrap();
-                arrayvec.serialize_length_delimited(&mut trans, false).await.unwrap();
+                let mut vec = Vec::<u8, 127>::new();
+                vec.extend_from_slice(bytes.as_slice()).unwrap();
+                vec.serialize_length_delimited(&mut trans, false).await.unwrap();
 
                 prop_assert_eq!(trans.buffer[0] as usize, bytes.len());
 
                 trans.to_reader();
 
-                let mut parsed = ArrayVec::<u8, 127>::new();
+                let mut parsed = Vec::<u8, 127>::new();
                 parsed.parse_length_delimited(&mut trans, false).await.unwrap();
 
-                prop_assert_eq!(parsed.as_slice(), arrayvec.as_slice());
+                prop_assert_eq!(parsed.as_slice(), vec.as_slice());
                 Ok(())
             }
 
@@ -378,9 +378,9 @@ mod test {
             async_test! {
                 let mut trans: MockTransporter<10> = MockTransporter::new();
 
-                let mut arrayvec = ArrayVec::<u8, 8>::new();
-                arrayvec.try_extend_from_slice(bytes.as_slice()).unwrap();
-                let null_terminated = NullTerminated(arrayvec);
+                let mut vec = Vec::<u8, 8>::new();
+                vec.extend_from_slice(bytes.as_slice()).unwrap();
+                let null_terminated = NullTerminated(vec);
 
                 null_terminated.serialize_length_delimited(&mut trans, false).await?;
 
@@ -389,7 +389,7 @@ mod test {
 
                 trans.to_reader();
 
-                let mut parsed = NullTerminated(ArrayVec::<u8, 8>::new());
+                let mut parsed = NullTerminated(Vec::<u8, 8>::new());
                 parsed.parse_length_delimited(&mut trans, false).await?;
 
                 prop_assert_eq!(parsed.as_slice(), null_terminated.as_slice());

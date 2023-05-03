@@ -29,13 +29,13 @@ use types::{InternalSocket, ProtocolMode, SocketAddr};
 // Core/std imports
 
 // External crate imports
-use arrayvec::ArrayVec;
 use embedded_hal_async::delay::DelayUs;
 use embedded_io::{
     asynch::{Read, Write},
     Io,
 };
 use embedded_nal_async::{Ipv4Addr, TcpConnect};
+use heapless::Vec;
 use lock_api::RawMutex;
 
 pub struct WifiNina<MutexType: RawMutex, T: Transport> {
@@ -85,7 +85,7 @@ impl<MutexType: RawMutex, T: Transport> WifiNina<MutexType, T> {
 
     pub async fn get_firmware_version(
         &mut self,
-    ) -> Result<arrayvec::ArrayVec<u8, 16>, error::Error<T::Error>> {
+    ) -> Result<heapless::Vec<u8, 16>, error::Error<T::Error>> {
         self.handle.get_firmware_version().await
     }
 
@@ -162,11 +162,11 @@ impl<MutexType: RawMutex, T: Transport> WifiNina<MutexType, T> {
 
     pub async fn scan_networks(
         &mut self,
-    ) -> Result<ArrayVec<types::ScannedNetwork, 32>, error::Error<T::Error>> {
+    ) -> Result<Vec<types::ScannedNetwork, 32>, error::Error<T::Error>> {
         self.handle.start_scan_networks().await?;
 
         let networks = self.handle.get_scanned_networks().await?;
-        let mut network_info = ArrayVec::new();
+        let mut network_info = Vec::new();
 
         for (i, ssid) in networks.into_iter().enumerate() {
             let i = i as u8;
@@ -175,7 +175,8 @@ impl<MutexType: RawMutex, T: Transport> WifiNina<MutexType, T> {
             let bssid = self.handle.get_scanned_network_bssid(i).await?;
             let channel = self.handle.get_scanned_network_channel(i).await?;
 
-            network_info.push(types::ScannedNetwork {
+            // This push cannot fail since we are iterating over at most 32 networks
+            let _ = network_info.push(types::ScannedNetwork {
                 ssid,
                 rssi,
                 encryption_type,
@@ -187,11 +188,11 @@ impl<MutexType: RawMutex, T: Transport> WifiNina<MutexType, T> {
         Ok(network_info)
     }
 
-    pub async fn ssid(&mut self) -> Result<arrayvec::ArrayVec<u8, 32>, error::Error<T::Error>> {
+    pub async fn ssid(&mut self) -> Result<heapless::Vec<u8, 32>, error::Error<T::Error>> {
         self.handle.get_current_ssid().await
     }
 
-    pub async fn bssid(&mut self) -> Result<arrayvec::ArrayVec<u8, 6>, error::Error<T::Error>> {
+    pub async fn bssid(&mut self) -> Result<heapless::Vec<u8, 6>, error::Error<T::Error>> {
         self.handle.get_current_bssid().await
     }
 

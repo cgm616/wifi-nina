@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use futures_intrusive::sync::GenericMutex;
+use heapless::Vec;
 use lock_api::RawMutex;
 
 use core::fmt;
@@ -45,9 +46,9 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
 
     pub async fn get_firmware_version(
         &self,
-    ) -> Result<arrayvec::ArrayVec<u8, 16>, error::Error<T::Error>> {
+    ) -> Result<heapless::Vec<u8, 16>, error::Error<T::Error>> {
         let send_params = (0u8,);
-        let mut recv_params = (param::NullTerminated::new(arrayvec::ArrayVec::new()),);
+        let mut recv_params = (param::NullTerminated::new(heapless::Vec::new()),);
 
         self.handle_cmd(
             command::Command::GetFwVersionCmd,
@@ -63,7 +64,7 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
 
     pub async fn get_mac_address(&self) -> Result<[u8; 6], error::Error<T::Error>> {
         let send_params = (0u8,);
-        let mut recv_params = (arrayvec::ArrayVec::new(),);
+        let mut recv_params: (Vec<u8, 6>,) = (Vec::new(),);
 
         self.handle_cmd(
             command::Command::GetMacaddrCmd,
@@ -72,7 +73,7 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
         )
         .await?;
 
-        Ok(recv_params.0.into_inner().unwrap())
+        Ok(recv_params.0.into_array().unwrap())
     }
 
     pub async fn start_scan_networks(&self) -> Result<(), error::Error<T::Error>> {
@@ -92,9 +93,8 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
 
     pub async fn get_scanned_networks(
         &self,
-    ) -> Result<arrayvec::ArrayVec<arrayvec::ArrayVec<u8, 32>, 16>, error::Error<T::Error>> {
-        let mut recv_params: arrayvec::ArrayVec<arrayvec::ArrayVec<u8, 32>, 16> =
-            arrayvec::ArrayVec::new();
+    ) -> Result<heapless::Vec<heapless::Vec<u8, 32>, 16>, error::Error<T::Error>> {
+        let mut recv_params: heapless::Vec<heapless::Vec<u8, 32>, 16> = heapless::Vec::new();
 
         self.handle_cmd(command::Command::ScanNetworks, &(), &mut recv_params)
             .await?;
@@ -150,7 +150,7 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
         network: u8,
     ) -> Result<[u8; 6], error::Error<T::Error>> {
         let send_params = (network,);
-        let mut recv_params = (arrayvec::ArrayVec::new(),);
+        let mut recv_params: (Vec<u8, 6>,) = (Vec::new(),);
 
         self.handle_cmd(
             command::Command::GetIdxBssid,
@@ -161,7 +161,7 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
 
         let (bssid,) = recv_params;
 
-        Ok(bssid.into_inner().unwrap())
+        Ok(bssid.into_array().unwrap())
     }
 
     pub async fn get_scanned_network_channel(
@@ -427,11 +427,9 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
         }
     }
 
-    pub async fn get_current_ssid(
-        &self,
-    ) -> Result<arrayvec::ArrayVec<u8, 32>, error::Error<T::Error>> {
+    pub async fn get_current_ssid(&self) -> Result<heapless::Vec<u8, 32>, error::Error<T::Error>> {
         let send_params = (0u8,);
-        let mut recv_params = (arrayvec::ArrayVec::new(),);
+        let mut recv_params = (heapless::Vec::new(),);
 
         self.handle_cmd(
             command::Command::GetCurrSsidCmd,
@@ -445,11 +443,9 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
         Ok(ssid)
     }
 
-    pub async fn get_current_bssid(
-        &self,
-    ) -> Result<arrayvec::ArrayVec<u8, 6>, error::Error<T::Error>> {
+    pub async fn get_current_bssid(&self) -> Result<heapless::Vec<u8, 6>, error::Error<T::Error>> {
         let send_params = (0u8,);
-        let mut recv_params = (arrayvec::ArrayVec::new(),);
+        let mut recv_params = (heapless::Vec::new(),);
 
         self.handle_cmd(
             command::Command::GetCurrBssidCmd,

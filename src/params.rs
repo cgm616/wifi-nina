@@ -1,4 +1,4 @@
-use arrayvec::ArrayVec;
+use heapless::Vec;
 
 use crate::transport::Transporter;
 
@@ -94,7 +94,7 @@ macro_rules! tuple_impls {
 
 tuple_impls!(A, B, C, D, E,);
 
-impl<U, const CAP: usize> SerializeParams for ArrayVec<U, CAP>
+impl<U, const CAP: usize> SerializeParams for Vec<U, CAP>
 where
     U: param::SerializeParam,
 {
@@ -108,7 +108,7 @@ where
     async fn serialize<T: Transporter>(&self, trans: &mut T, long: bool) -> Result<(), T::Error> {
         use core::convert::TryFrom;
 
-        let len = u8::try_from(self.len()).unwrap(); // TODO:: do we really want to unwrap?
+        let len = u8::try_from(self.as_slice().len()).unwrap(); // TODO:: do we really want to unwrap?
         trans.write(len).await?;
         for item in self.iter() {
             item.serialize_length_delimited(trans, long).await?;
@@ -117,7 +117,7 @@ where
     }
 }
 
-impl<U, const CAP: usize> ParseParams for arrayvec::ArrayVec<U, CAP>
+impl<U, const CAP: usize> ParseParams for heapless::Vec<U, CAP>
 where
     U: param::ParseParam + Default,
 {
@@ -126,7 +126,10 @@ where
         for _ in 0..items {
             let mut item: U = Default::default();
             item.parse_length_delimited(trans, long).await?;
-            self.push(item);
+            // This should always succeed as long as this driver is written correctly
+            // since the maximum response length should be encoded in the command's
+            // handling function.
+            let _ = self.push(item);
         }
         Ok(())
     }
@@ -166,14 +169,14 @@ mod test {
             async_test! {
                 let mut trans: MockTransporter<20> = MockTransporter::new();
 
-                let mut arrayvec = ArrayVec::<u8, 16>::new();
-                arrayvec.try_extend_from_slice(second.as_slice()).unwrap();
-                let params = (first, arrayvec);
+                let mut vec = Vec::<u8, 16>::new();
+                vec.extend_from_slice(second.as_slice()).unwrap();
+                let params = (first, vec);
                 params.serialize(&mut trans, false).await?;
 
                 trans.to_reader();
 
-                let mut parsed = (0, ArrayVec::<u8, 16>::new());
+                let mut parsed = (0, Vec::<u8, 16>::new());
                 parsed.parse(&mut trans, false).await?;
 
                 prop_assert_eq!(parsed, params);
@@ -182,22 +185,22 @@ mod test {
         }
 
         #[test]
-        fn serialize_and_parse_arrayvec(params in proptest::collection::vec(any::<u32>(), 0..=16)) {
+        fn serialize_and_parse_vec(params in proptest::collection::vec(any::<u32>(), 0..=16)) {
             async_test! {
                 use crate::param::Scalar;
 
                 let mut trans: MockTransporter<81> = MockTransporter::new();
 
-                let mut arrayvec = ArrayVec::<Scalar<byteorder::BigEndian, u32>, 16>::new();
-                arrayvec.extend(params.iter().cloned().map(Scalar::be));
-                arrayvec.serialize(&mut trans, false).await?;
+                let mut vec = Vec::<Scalar<byteorder::BigEndian, u32>, 16>::new();
+                vec.extend(params.iter().cloned().map(Scalar::be));
+                vec.serialize(&mut trans, false).await?;
 
                 trans.to_reader();
 
-                let mut parsed = ArrayVec::<Scalar<byteorder::BigEndian, u32>, 16>::new();
+                let mut parsed = Vec::<Scalar<byteorder::BigEndian, u32>, 16>::new();
                 parsed.parse(&mut trans, false).await?;
 
-                prop_assert_eq!(parsed, arrayvec);
+                prop_assert_eq!(parsed, vec);
                 Ok(())
             }
         }
