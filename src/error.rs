@@ -9,6 +9,7 @@ use crate::types;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error<E: EioError> {
     Transport(E),
+    NotIpv4,
     Delay,
     SetNetwork,
     SetPassphrase,

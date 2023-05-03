@@ -293,7 +293,7 @@ where
 
         // ----- SECOND PART: RECEIVING -----
 
-        self.transaction::<'_, '_, 8, _, _>(|mut trans| async move {
+        self.transaction::<'_, '_, 1, _, _>(|mut trans| async move {
             trans.refill().await?;
 
             let mut first = [0; 2];

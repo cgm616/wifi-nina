@@ -1,26 +1,33 @@
 #![allow(dead_code)]
 
-use embedded_nal_async::Ipv4Addr;
+use futures_intrusive::sync::GenericMutex;
+use lock_api::RawMutex;
 
 use core::fmt;
 
-use crate::{command, error, param, params, transport::Transport, types};
+use crate::{
+    command, error, param, params,
+    transport::Transport,
+    types::{self, InternalSocket, IpAddr, Ipv4Addr, ProtocolMode, SocketAddr},
+};
 
 /// A handler that knows how to interface with the `wifi-nina` firmware on the
 /// coprocessor given a connection to that coprocessor.
 #[derive(Debug)]
-pub struct Handler<T: Transport> {
-    transport: T,
+pub struct WifiNinaHandle<MutexType: RawMutex, T: Transport> {
+    transport: GenericMutex<MutexType, T>,
 }
 
-impl<T: Transport> Handler<T> {
+impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
     /// Construct a new [`Handler`] from an underlying [`Transport`].
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self {
+            transport: GenericMutex::new(transport, false),
+        }
     }
 
     pub async fn get_connection_state(
-        &mut self,
+        &self,
     ) -> Result<types::ConnectionState, error::Error<T::Error>> {
         use core::convert::TryFrom;
 
@@ -37,7 +44,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn get_firmware_version(
-        &mut self,
+        &self,
     ) -> Result<arrayvec::ArrayVec<u8, 16>, error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (param::NullTerminated::new(arrayvec::ArrayVec::new()),);
@@ -54,7 +61,7 @@ impl<T: Transport> Handler<T> {
         Ok(result)
     }
 
-    pub async fn get_mac_address(&mut self) -> Result<[u8; 6], error::Error<T::Error>> {
+    pub async fn get_mac_address(&self) -> Result<[u8; 6], error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (arrayvec::ArrayVec::new(),);
 
@@ -68,7 +75,7 @@ impl<T: Transport> Handler<T> {
         Ok(recv_params.0.into_inner().unwrap())
     }
 
-    pub async fn start_scan_networks(&mut self) -> Result<(), error::Error<T::Error>> {
+    pub async fn start_scan_networks(&self) -> Result<(), error::Error<T::Error>> {
         let mut recv_params = (0u8,);
 
         self.handle_cmd(command::Command::StartScanNetworks, &(), &mut recv_params)
@@ -84,7 +91,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn get_scanned_networks(
-        &mut self,
+        &self,
     ) -> Result<arrayvec::ArrayVec<arrayvec::ArrayVec<u8, 32>, 16>, error::Error<T::Error>> {
         let mut recv_params: arrayvec::ArrayVec<arrayvec::ArrayVec<u8, 32>, 16> =
             arrayvec::ArrayVec::new();
@@ -96,7 +103,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn get_scanned_network_rssi(
-        &mut self,
+        &self,
         network: u8,
     ) -> Result<i32, error::Error<T::Error>> {
         let send_params = (network,);
@@ -115,7 +122,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn get_scanned_network_encryption_type(
-        &mut self,
+        &self,
         network: u8,
     ) -> Result<types::EncryptionType, error::Error<T::Error>> {
         use core::convert::TryFrom;
@@ -139,7 +146,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn get_scanned_network_bssid(
-        &mut self,
+        &self,
         network: u8,
     ) -> Result<[u8; 6], error::Error<T::Error>> {
         let send_params = (network,);
@@ -158,7 +165,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn get_scanned_network_channel(
-        &mut self,
+        &self,
         network: u8,
     ) -> Result<u8, error::Error<T::Error>> {
         let send_params = (network,);
@@ -176,10 +183,7 @@ impl<T: Transport> Handler<T> {
         Ok(channel)
     }
 
-    pub async fn request_host_by_name(
-        &mut self,
-        hostname: &str,
-    ) -> Result<(), error::Error<T::Error>> {
+    pub async fn request_host_by_name(&self, hostname: &str) -> Result<(), error::Error<T::Error>> {
         let send_params = (param::NullTerminated::new(hostname.as_bytes()),);
         let mut recv_params = (0u8,);
 
@@ -199,7 +203,7 @@ impl<T: Transport> Handler<T> {
         }
     }
 
-    pub async fn get_host_by_name(&mut self) -> Result<Ipv4Addr, error::Error<T::Error>> {
+    pub async fn get_host_by_name(&self) -> Result<Ipv4Addr, error::Error<T::Error>> {
         let mut recv_params = (param::Scalar::be(0u32),);
 
         self.handle_cmd(command::Command::GetHostByNameCmd, &(), &mut recv_params)
@@ -210,7 +214,7 @@ impl<T: Transport> Handler<T> {
         Ok(ip.into_inner().into())
     }
 
-    pub async fn get_network_data(&mut self) -> Result<types::NetworkData, error::Error<T::Error>> {
+    pub async fn get_network_data(&self) -> Result<types::NetworkData, error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (
             param::Scalar::be(0u32),
@@ -233,9 +237,9 @@ impl<T: Transport> Handler<T> {
         Ok(types::NetworkData { ip, mask, gateway })
     }
 
-    pub async fn get_remote_data(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn get_remote_data(
+        &self,
+        socket: InternalSocket,
     ) -> Result<types::RemoteData, error::Error<T::Error>> {
         let send_params = (socket.0,);
         let mut recv_params = (param::Scalar::be(0u32), param::Scalar::be(0u32));
@@ -254,7 +258,7 @@ impl<T: Transport> Handler<T> {
         Ok(types::RemoteData { ip, port })
     }
 
-    pub async fn set_network(&mut self, ssid: &[u8]) -> Result<(), error::Error<T::Error>> {
+    pub async fn set_network(&self, ssid: &[u8]) -> Result<(), error::Error<T::Error>> {
         let send_params = (param::NullTerminated::new(ssid),);
         let mut recv_params = (0u8,);
 
@@ -271,7 +275,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn set_passphrase(
-        &mut self,
+        &self,
         ssid: &[u8],
         passphrase: &[u8],
     ) -> Result<(), error::Error<T::Error>> {
@@ -298,7 +302,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn set_key(
-        &mut self,
+        &self,
         ssid: &str,
         key_idx: u8,
         key: &[u8],
@@ -324,7 +328,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn config(
-        &mut self,
+        &self,
         valid_params: u8,
         local_ip: Ipv4Addr,
         gateway: Ipv4Addr,
@@ -355,7 +359,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn set_dns(
-        &mut self,
+        &self,
         valid_params: u8,
         dns_server1: Ipv4Addr,
         dns_server2: Ipv4Addr,
@@ -383,7 +387,7 @@ impl<T: Transport> Handler<T> {
         }
     }
 
-    pub async fn set_hostname(&mut self, hostname: &str) -> Result<(), error::Error<T::Error>> {
+    pub async fn set_hostname(&self, hostname: &str) -> Result<(), error::Error<T::Error>> {
         let send_params = (param::NullTerminated::new(hostname.as_bytes()),);
         let mut recv_params = (0u8,);
 
@@ -403,7 +407,7 @@ impl<T: Transport> Handler<T> {
         }
     }
 
-    pub async fn disconnect(&mut self) -> Result<(), error::Error<T::Error>> {
+    pub async fn disconnect(&self) -> Result<(), error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (0u8,);
 
@@ -424,7 +428,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn get_current_ssid(
-        &mut self,
+        &self,
     ) -> Result<arrayvec::ArrayVec<u8, 32>, error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (arrayvec::ArrayVec::new(),);
@@ -442,7 +446,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn get_current_bssid(
-        &mut self,
+        &self,
     ) -> Result<arrayvec::ArrayVec<u8, 6>, error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (arrayvec::ArrayVec::new(),);
@@ -457,7 +461,7 @@ impl<T: Transport> Handler<T> {
         Ok(recv_params.0)
     }
 
-    pub async fn get_current_rssi(&mut self) -> Result<i32, error::Error<T::Error>> {
+    pub async fn get_current_rssi(&self) -> Result<i32, error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (param::Scalar::be(0u32),);
 
@@ -474,7 +478,7 @@ impl<T: Transport> Handler<T> {
     }
 
     pub async fn get_current_encryption_type(
-        &mut self,
+        &self,
     ) -> Result<types::EncryptionType, error::Error<T::Error>> {
         use core::convert::TryFrom;
 
@@ -496,16 +500,20 @@ impl<T: Transport> Handler<T> {
         Ok(encryption_type)
     }
 
-    pub async fn start_client_by_ip(
-        &mut self,
-        ip: Ipv4Addr,
-        port: u16,
-        socket: types::Socket,
-        protocol_mode: types::ProtocolMode,
+    pub(crate) async fn start_client_by_addr(
+        &self,
+        addr: SocketAddr,
+        socket: InternalSocket,
+        protocol_mode: ProtocolMode,
     ) -> Result<(), error::Error<T::Error>> {
+        let ipv4 = match addr.ip() {
+            IpAddr::V4(ip) => ip,
+            _ => return Err(error::Error::NotIpv4),
+        };
+
         let send_params = (
-            param::Scalar::be(u32::from(ip)),
-            param::Scalar::be(port),
+            param::Scalar::be(u32::from(ipv4)),
+            param::Scalar::be(addr.port()),
             socket.0,
             u8::from(protocol_mode),
         );
@@ -527,9 +535,9 @@ impl<T: Transport> Handler<T> {
         }
     }
 
-    pub async fn stop_client(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn stop_client(
+        &self,
+        socket: InternalSocket,
     ) -> Result<(), error::Error<T::Error>> {
         let send_params = (socket.0,);
         let mut recv_params = (0u8,);
@@ -550,9 +558,9 @@ impl<T: Transport> Handler<T> {
         }
     }
 
-    pub async fn get_client_state(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn get_client_state(
+        &self,
+        socket: InternalSocket,
     ) -> Result<types::TcpState, error::Error<T::Error>> {
         use core::convert::TryFrom;
 
@@ -572,9 +580,9 @@ impl<T: Transport> Handler<T> {
         Ok(state)
     }
 
-    pub async fn avail_data(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn avail_data(
+        &self,
+        socket: InternalSocket,
     ) -> Result<u16, error::Error<T::Error>> {
         let send_params = (socket.0,);
         let mut recv_params = (param::Scalar::le(0u16),);
@@ -591,9 +599,9 @@ impl<T: Transport> Handler<T> {
         Ok(data.into_inner())
     }
 
-    pub async fn get_data_buf(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn get_data_buf(
+        &self,
+        socket: InternalSocket,
         buf: &mut [u8],
     ) -> Result<usize, error::Error<T::Error>> {
         use core::convert::TryFrom;
@@ -613,9 +621,9 @@ impl<T: Transport> Handler<T> {
         Ok(recv_params.0.len())
     }
 
-    pub async fn send_data(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn send_data(
+        &self,
+        socket: InternalSocket,
         data: &[u8],
     ) -> Result<usize, error::Error<T::Error>> {
         let send_params = (socket.0, data);
@@ -633,9 +641,9 @@ impl<T: Transport> Handler<T> {
         Ok(len.into_inner() as usize)
     }
 
-    pub async fn check_data_sent(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn check_data_sent(
+        &self,
+        socket: InternalSocket,
     ) -> Result<(), error::Error<T::Error>> {
         let send_params = (socket.0,);
         let mut recv_params = (0u8,);
@@ -656,20 +664,20 @@ impl<T: Transport> Handler<T> {
         }
     }
 
-    pub async fn get_socket(&mut self) -> Result<types::Socket, error::Error<T::Error>> {
+    pub(crate) async fn get_socket(&self) -> Result<InternalSocket, error::Error<T::Error>> {
         let mut recv_params = (0u8,);
 
         self.handle_cmd(command::Command::GetSocketCmd, &(), &mut recv_params)
             .await?;
 
         let (socket,) = recv_params;
-        let socket = types::Socket(socket);
+        let socket = InternalSocket(socket);
 
         Ok(socket)
     }
 
     pub async fn pin_mode(
-        &mut self,
+        &self,
         pin: u8,
         mode: types::PinMode,
     ) -> Result<(), error::Error<T::Error>> {
@@ -688,11 +696,7 @@ impl<T: Transport> Handler<T> {
         }
     }
 
-    pub async fn digital_write(
-        &mut self,
-        pin: u8,
-        value: u8,
-    ) -> Result<(), error::Error<T::Error>> {
+    pub async fn digital_write(&self, pin: u8, value: u8) -> Result<(), error::Error<T::Error>> {
         let send_params = (pin, value);
         let mut recv_params = (0u8,);
 
@@ -712,7 +716,7 @@ impl<T: Transport> Handler<T> {
         }
     }
 
-    pub async fn analog_write(&mut self, pin: u8, value: u8) -> Result<(), error::Error<T::Error>> {
+    pub async fn analog_write(&self, pin: u8, value: u8) -> Result<(), error::Error<T::Error>> {
         let send_params = (pin, value);
         let mut recv_params = (0u8,);
 
@@ -733,7 +737,7 @@ impl<T: Transport> Handler<T> {
     }
 
     async fn handle_cmd<SP, RP>(
-        &mut self,
+        &self,
         command: command::Command,
         send_params: &SP,
         recv_params: &mut RP,
@@ -743,13 +747,15 @@ impl<T: Transport> Handler<T> {
         RP: params::ParseParams + fmt::Debug,
     {
         self.transport
+            .lock()
+            .await
             .handle_cmd(command, send_params, recv_params, false, false)
             .await
             .map_err(error::Error::Transport)
     }
 
     async fn handle_long_send_cmd<SP, RP>(
-        &mut self,
+        &self,
         command: command::Command,
         send_params: &SP,
         recv_params: &mut RP,
@@ -759,13 +765,15 @@ impl<T: Transport> Handler<T> {
         RP: params::ParseParams + fmt::Debug,
     {
         self.transport
+            .lock()
+            .await
             .handle_cmd(command, send_params, recv_params, true, false)
             .await
             .map_err(error::Error::Transport)
     }
 
     async fn handle_long_send_long_recv_cmd<SP, RP>(
-        &mut self,
+        &self,
         command: command::Command,
         send_params: &SP,
         recv_params: &mut RP,
@@ -775,6 +783,8 @@ impl<T: Transport> Handler<T> {
         RP: params::ParseParams + fmt::Debug,
     {
         self.transport
+            .lock()
+            .await
             .handle_cmd(command, send_params, recv_params, true, true)
             .await
             .map_err(error::Error::Transport)

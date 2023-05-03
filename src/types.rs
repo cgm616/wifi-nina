@@ -1,6 +1,9 @@
-use core::fmt;
+use core::{
+    fmt,
+    ops::{Deref, DerefMut},
+};
 
-use embedded_nal_async::Ipv4Addr;
+pub use embedded_nal_async::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Config<'a> {
@@ -27,7 +30,21 @@ pub struct AccessPointConfig<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Socket(pub(crate) u8);
+pub(crate) struct InternalSocket(pub u8);
+
+impl Deref for InternalSocket {
+    type Target = u8;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for InternalSocket {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScannedNetwork {
