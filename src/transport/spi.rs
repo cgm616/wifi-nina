@@ -18,8 +18,10 @@ use embedded_hal_async::{
     spi::{SpiBus, SpiBusFlush},
 };
 use embedded_io::Error as EioError;
+use futures_intrusive::sync::GenericMutex;
+use lock_api::RawMutex;
 
-use core::{cell::RefCell, fmt, fmt::Debug, future::Future};
+use core::{fmt, fmt::Debug, future::Future};
 
 use crate::{
     command, params,
@@ -37,25 +39,19 @@ use crate::{
 /// through the busy pin. That is, the driver needs to control chip-select
 /// in conjunction with reading the busy signal from the WifiNina.
 #[derive(Debug)]
-pub struct SpiTransport<SPI, CS, BUSY, RESET> {
+pub struct SpiTransport<MutexType: RawMutex, SPI, CS, BUSY, RESET> {
+    handle: SpiHandle<MutexType, SPI, CS, BUSY, RESET>,
+}
+
+type SpiHandle<MutexType, SPI, CS, BUSY, RESET> =
+    GenericMutex<MutexType, Spi<SPI, CS, BUSY, RESET>>;
+
+#[derive(Debug)]
+pub struct Spi<SPI, CS, BUSY, RESET> {
     spi: SPI,
     cs: CS,
     busy: BUSY,
     reset: RESET,
-}
-
-/// A [`Transporter`] that buffers reads and writes to the SPI bus
-pub struct BufTransporter<
-    'a,
-    const CAPACITY: usize,
-    SPI: 'a + SpiBus + SpiBusFlush,
-    CS: 'a + OutputPin,
-    BUSY: 'a + Wait + InputPin,
-    RESET: 'a + OutputPin,
-> {
-    buffer: [u8; CAPACITY],
-    cursor: usize, // should never be more than CAPACITY or length
-    spi: RefCell<&'a mut SpiTransport<SPI, CS, BUSY, RESET>>,
 }
 
 /// An error thrown by [`SpiTransport`]
@@ -103,139 +99,14 @@ impl<SPI, CS, BUSY, RESET> EioError for SpiError<SPI, CS, BUSY, RESET> {
     }
 }
 
-impl<'a, const CAPACITY: usize, SPI, CS, BUSY, RESET> Transporter
-    for BufTransporter<'a, CAPACITY, SPI, CS, BUSY, RESET>
-where
-    SPI: SpiBus + SpiBusFlush,
-    CS: OutputPin,
-    BUSY: Wait + InputPin,
-    RESET: OutputPin,
-{
-    type Error = SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>;
-
-    async fn read(&mut self) -> Result<u8, Self::Error> {
-        if self.cursor >= self.buffer.len() {
-            // We have consumed the buffer. Get more from the layer
-            self.refill().await?;
-        }
-
-        // Return the next byte and increment the cursor
-        let ret = self.buffer[self.cursor];
-        self.cursor += 1;
-        Ok(ret)
-    }
-
-    async fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
-        if self.cursor >= self.buffer.len() {
-            // We have filled the buffer. Flush it to the layer
-            self.flush().await?;
-        }
-
-        // Save the byte and increment the cursor
-        self.buffer[self.cursor] = byte;
-        self.cursor += 1;
-        Ok(())
-    }
-}
-
-impl<'a, const CAPACITY: usize, SPI, CS, BUSY, RESET>
-    BufTransporter<'a, CAPACITY, SPI, CS, BUSY, RESET>
-where
-    SPI: SpiBus + SpiBusFlush,
-    CS: OutputPin,
-    BUSY: Wait + InputPin,
-    RESET: OutputPin,
-{
-    /// Create a new `BufTransporter`, opening a transaction on the SPI bus
-    async fn new(
-        spi: &'a mut SpiTransport<SPI, CS, BUSY, RESET>,
-    ) -> Result<Self, <Self as Transporter>::Error> {
-        // Wait until the WifiNina is ready to receive
-        spi.busy.wait_for_low().await.map_err(SpiError::Busy)?;
-
-        // Assert chip select
-        spi.cs.set_low().map_err(SpiError::Cs)?;
-
-        // Wait until the WifiNina is ready to receive
-        spi.busy.wait_for_high().await.map_err(SpiError::Busy)?;
-
-        Ok(Self {
-            buffer: [0; CAPACITY],
-            cursor: 0,
-            spi: RefCell::new(spi),
-        })
-    }
-
-    /// Clear the internal state
-    fn clear(&mut self) {
-        self.buffer = [0; CAPACITY];
-        self.cursor = 0;
-    }
-
-    /// Send the data in the buffer over the SPI bus
-    async fn flush(&mut self) -> Result<(), <Self as Transporter>::Error> {
-        // Pad the buffer to a multiple of four
-        while self.cursor % 4 != 0 {
-            self.buffer[self.cursor] = 0xFF;
-            self.cursor += 1;
-        }
-
-        // Send the data in the buffer
-        self.spi
-            .borrow_mut()
-            .spi
-            .transfer_in_place(&mut self.buffer[0..self.cursor])
-            .await
-            .map_err(SpiError::Spi)?;
-
-        // Flush the transport layer
-        self.spi
-            .borrow_mut()
-            .spi
-            .flush()
-            .await
-            .map_err(SpiError::Spi)?;
-
-        self.clear();
-        Ok(())
-    }
-
-    /// Refill the internal buffer with data from the SPI bus
-    async fn refill(&mut self) -> Result<(), <Self as Transporter>::Error> {
-        self.clear();
-
-        // Fill the buffer
-        self.spi
-            .borrow_mut()
-            .spi
-            .transfer_in_place(&mut self.buffer)
-            .await
-            .map_err(SpiError::Spi)?;
-
-        Ok(())
-    }
-}
-
-impl<'a, const CAPACITY: usize, SPI, CS, BUSY, RESET> Drop
-    for BufTransporter<'a, CAPACITY, SPI, CS, BUSY, RESET>
-where
-    SPI: SpiBus + SpiBusFlush,
-    CS: OutputPin,
-    BUSY: Wait + InputPin,
-    RESET: OutputPin,
-{
-    fn drop(&mut self) {
-        let _ = self.spi.borrow_mut().cs.set_high();
-    }
-}
-
 const START_CMD: u8 = 0xe0;
 const END_CMD: u8 = 0xee;
 const ERR_CMD: u8 = 0xef;
 const REPLY_FLAG: u8 = 1 << 7;
 
-impl<SPI, CS, BUSY, RESET> Transport for SpiTransport<SPI, CS, BUSY, RESET>
+impl<MutexType, SPI, CS, BUSY, RESET> Transport for SpiTransport<MutexType, SPI, CS, BUSY, RESET>
 where
+    MutexType: RawMutex,
     SPI: SpiBus + SpiBusFlush,
     CS: OutputPin,
     BUSY: Wait + InputPin,
@@ -249,14 +120,24 @@ where
         #[cfg(feature = "reset-high")]
         self.reset.set_high().map_err(SpiError::Reset)?;
         #[cfg(not(feature = "reset-high"))]
-        self.reset.set_low().map_err(SpiError::Reset)?;
+        self.handle
+            .lock()
+            .await
+            .reset
+            .set_low()
+            .map_err(SpiError::Reset)?;
 
         delay.delay_ms(100).await;
 
         #[cfg(feature = "reset-high")]
         self.reset.set_low().map_err(SpiError::Reset)?;
         #[cfg(not(feature = "reset-high"))]
-        self.reset.set_high().map_err(SpiError::Reset)?;
+        self.handle
+            .lock()
+            .await
+            .reset
+            .set_high()
+            .map_err(SpiError::Reset)?;
 
         delay.delay_ms(750).await;
 
@@ -328,8 +209,9 @@ where
     }
 }
 
-impl<SPI, CS, BUSY, RESET> SpiTransport<SPI, CS, BUSY, RESET>
+impl<MutexType, SPI, CS, BUSY, RESET> SpiTransport<MutexType, SPI, CS, BUSY, RESET>
 where
+    MutexType: RawMutex,
     SPI: SpiBus + SpiBusFlush,
     CS: OutputPin,
     BUSY: Wait + InputPin,
@@ -344,10 +226,15 @@ where
         delay: DELAY,
     ) -> Result<Self, <Self as Transport>::Error> {
         let mut this = Self {
-            spi,
-            cs,
-            busy,
-            reset,
+            handle: GenericMutex::new(
+                Spi {
+                    spi,
+                    cs,
+                    busy,
+                    reset,
+                },
+                false,
+            ),
         };
 
         super::Transport::reset(&mut this, delay).await?;
@@ -366,12 +253,171 @@ where
         f: F,
     ) -> Result<(), SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>>
     where
-        F: (FnOnce(BufTransporter<'inner, CAPACITY, SPI, CS, BUSY, RESET>) -> Fut) + 'trans,
+        F: (FnOnce(BufTransporter<'inner, CAPACITY, MutexType, SPI, CS, BUSY, RESET>) -> Fut)
+            + 'trans,
         Fut: Future<Output = Result<(), SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>>>
             + 'inner,
     {
-        let trans: BufTransporter<CAPACITY, _, _, _, _> = BufTransporter::new(self).await?;
+        let trans: BufTransporter<CAPACITY, _, _, _, _, _> =
+            BufTransporter::new(&self.handle).await?;
 
         f(trans).await
+    }
+}
+
+/// A [`Transporter`] that buffers reads and writes to the SPI bus
+pub struct BufTransporter<
+    'a,
+    const CAPACITY: usize,
+    MutexType: RawMutex,
+    SPI: 'a + SpiBus + SpiBusFlush,
+    CS: 'a + OutputPin,
+    BUSY: 'a + Wait + InputPin,
+    RESET: 'a + OutputPin,
+> {
+    buffer: [u8; CAPACITY],
+    cursor: usize, // should never be more than CAPACITY or length
+    spi: &'a SpiHandle<MutexType, SPI, CS, BUSY, RESET>,
+}
+
+impl<'a, const CAPACITY: usize, MutexType, SPI, CS, BUSY, RESET> Transporter
+    for BufTransporter<'a, CAPACITY, MutexType, SPI, CS, BUSY, RESET>
+where
+    MutexType: RawMutex,
+    SPI: SpiBus + SpiBusFlush,
+    CS: OutputPin,
+    BUSY: Wait + InputPin,
+    RESET: OutputPin,
+{
+    type Error = SpiError<SPI::Error, CS::Error, BUSY::Error, RESET::Error>;
+
+    async fn read(&mut self) -> Result<u8, Self::Error> {
+        if self.cursor >= self.buffer.len() {
+            // We have consumed the buffer. Get more from the layer
+            self.refill().await?;
+        }
+
+        // Return the next byte and increment the cursor
+        let ret = self.buffer[self.cursor];
+        self.cursor += 1;
+        Ok(ret)
+    }
+
+    async fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
+        if self.cursor >= self.buffer.len() {
+            // We have filled the buffer. Flush it to the layer
+            self.flush().await?;
+        }
+
+        // Save the byte and increment the cursor
+        self.buffer[self.cursor] = byte;
+        self.cursor += 1;
+        Ok(())
+    }
+}
+
+impl<'a, const CAPACITY: usize, MutexType, SPI, CS, BUSY, RESET>
+    BufTransporter<'a, CAPACITY, MutexType, SPI, CS, BUSY, RESET>
+where
+    MutexType: RawMutex,
+    SPI: SpiBus + SpiBusFlush,
+    CS: OutputPin,
+    BUSY: Wait + InputPin,
+    RESET: OutputPin,
+{
+    /// Create a new `BufTransporter`, opening a transaction on the SPI bus
+    async fn new(
+        spi: &'a SpiHandle<MutexType, SPI, CS, BUSY, RESET>,
+    ) -> Result<Self, <Self as Transporter>::Error> {
+        // Wait until the WifiNina is ready to receive
+        spi.lock()
+            .await
+            .busy
+            .wait_for_low()
+            .await
+            .map_err(SpiError::Busy)?;
+
+        // Assert chip select
+        spi.lock().await.cs.set_low().map_err(SpiError::Cs)?;
+
+        // Wait until the WifiNina is ready to receive
+        spi.lock()
+            .await
+            .busy
+            .wait_for_high()
+            .await
+            .map_err(SpiError::Busy)?;
+
+        Ok(Self {
+            buffer: [0; CAPACITY],
+            cursor: 0,
+            spi,
+        })
+    }
+
+    /// Clear the internal state
+    fn clear(&mut self) {
+        self.buffer = [0; CAPACITY];
+        self.cursor = 0;
+    }
+
+    /// Send the data in the buffer over the SPI bus
+    async fn flush(&mut self) -> Result<(), <Self as Transporter>::Error> {
+        // Pad the buffer to a multiple of four
+        while self.cursor % 4 != 0 {
+            self.buffer[self.cursor] = 0xFF;
+            self.cursor += 1;
+        }
+
+        // Send the data in the buffer
+        self.spi
+            .lock()
+            .await
+            .spi
+            .transfer_in_place(&mut self.buffer[0..self.cursor])
+            .await
+            .map_err(SpiError::Spi)?;
+
+        // Flush the transport layer
+        self.spi
+            .lock()
+            .await
+            .spi
+            .flush()
+            .await
+            .map_err(SpiError::Spi)?;
+
+        self.clear();
+        Ok(())
+    }
+
+    /// Refill the internal buffer with data from the SPI bus
+    async fn refill(&mut self) -> Result<(), <Self as Transporter>::Error> {
+        self.clear();
+
+        // Fill the buffer
+        self.spi
+            .lock()
+            .await
+            .spi
+            .transfer_in_place(&mut self.buffer)
+            .await
+            .map_err(SpiError::Spi)?;
+
+        Ok(())
+    }
+}
+
+impl<'a, const CAPACITY: usize, MutexType, SPI, CS, BUSY, RESET> Drop
+    for BufTransporter<'a, CAPACITY, MutexType, SPI, CS, BUSY, RESET>
+where
+    MutexType: RawMutex,
+    SPI: SpiBus + SpiBusFlush,
+    CS: OutputPin,
+    BUSY: Wait + InputPin,
+    RESET: OutputPin,
+{
+    fn drop(&mut self) {
+        let _ = self.spi.try_lock().map(|mut spi| spi.cs.set_high());
     }
 }
