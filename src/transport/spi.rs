@@ -118,7 +118,12 @@ where
         // self.cs.set_high().map_err(SpiError::Cs)?;
 
         #[cfg(feature = "reset-high")]
-        self.reset.set_high().map_err(SpiError::Reset)?;
+        self.handle
+            .lock()
+            .await
+            .reset
+            .set_high()
+            .map_err(SpiError::Reset)?;
         #[cfg(not(feature = "reset-high"))]
         self.handle
             .lock()
@@ -130,7 +135,12 @@ where
         delay.delay_ms(100).await;
 
         #[cfg(feature = "reset-high")]
-        self.reset.set_low().map_err(SpiError::Reset)?;
+        self.handle
+            .lock()
+            .await
+            .reset
+            .set_low()
+            .map_err(SpiError::Reset)?;
         #[cfg(not(feature = "reset-high"))]
         self.handle
             .lock()
