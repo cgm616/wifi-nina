@@ -1,259 +1,303 @@
-#![no_std]
+#![doc = include_str!("../README.md")]
+#![cfg_attr(not(test), no_std)]
+#![feature(async_fn_in_trait)]
+#![feature(impl_trait_projections)]
+#![allow(incomplete_features)]
+#![feature(generic_const_exprs)]
 
-use core::marker;
-use core::time;
-
+// Private modules
 mod command;
 mod encoding;
 mod error;
-mod full_duplex;
-mod handler;
+mod handle;
 mod param;
 mod params;
+mod util;
+
+// Public modules
 pub mod transport;
 pub mod types;
 
+// Public internal imports
 pub use error::Error;
 
-const BUFFER_CAPACITY: usize = 4096;
+// Private internal imports
+use handle::WifiNinaHandle;
+use transport::Transport;
+use types::{InternalSocket, ProtocolMode, SocketAddr};
 
-#[derive(Debug)]
-pub struct Wifi<T> {
-    handler: handler::Handler<T>,
+// Core/std imports
+
+// External crate imports
+use embedded_hal_async::delay::DelayUs;
+use embedded_io::{
+    asynch::{Read, Write},
+    Io,
+};
+use embedded_nal_async::{Ipv4Addr, TcpConnect};
+use heapless::Vec;
+use lock_api::RawMutex;
+
+pub struct WifiNina<MutexType: RawMutex, T: Transport> {
+    handle: WifiNinaHandle<MutexType, T>,
     led_init: bool,
 }
 
-#[derive(Debug)]
-pub struct Client<T> {
-    socket: types::Socket,
-    buffer_offset: usize,
-    buffer: arrayvec::ArrayVec<[u8; BUFFER_CAPACITY]>,
-    phantom: marker::PhantomData<T>,
+impl<MutexType: RawMutex, T: Transport> TcpConnect for WifiNina<MutexType, T> {
+    type Error = error::Error<T::Error>;
+    type Connection<'a> = Socket<'a, 4096, MutexType, T> where MutexType: 'a, T: 'a;
+
+    async fn connect<'a>(&'a self, remote: SocketAddr) -> Result<Self::Connection<'a>, Self::Error>
+    where
+        Self: 'a,
+    {
+        // reject non-ipv4 addresses
+        if !remote.is_ipv4() {
+            return Err(error::Error::NotIpv4);
+        }
+
+        // ask the WifiNina for a socket
+        let socket = self.handle.get_socket().await?;
+
+        // start a new connection on that socket
+        self.handle
+            .start_client_by_addr(remote, socket, ProtocolMode::Tcp)
+            .await?;
+
+        // wrap it all up and return a new connection
+        Ok(Socket {
+            handle: &self.handle,
+            socket,
+            cursor: 0,
+            buffer: [0; 4096],
+        })
+    }
 }
 
-impl<T> Wifi<T>
-where
-    T: transport::Transport,
-{
+impl<MutexType: RawMutex, T: Transport> WifiNina<MutexType, T> {
     pub fn new(transport: T) -> Self {
-        let handler = handler::Handler::new(transport);
-        let led_init = false;
-        Self { handler, led_init }
+        let handle = handle::WifiNinaHandle::new(transport);
+        Self {
+            handle,
+            led_init: false,
+        }
     }
 
-    pub fn get_firmware_version(
+    pub async fn get_firmware_version(
         &mut self,
-    ) -> Result<arrayvec::ArrayVec<[u8; 16]>, error::Error<T::Error>> {
-        self.handler.get_firmware_version()
+    ) -> Result<heapless::Vec<u8, 16>, error::Error<T::Error>> {
+        self.handle.get_firmware_version().await
     }
 
-    pub fn set_led(&mut self, r: u8, g: u8, b: u8) -> Result<(), error::Error<T::Error>> {
+    pub async fn set_led(&mut self, r: u8, g: u8, b: u8) -> Result<(), error::Error<T::Error>> {
         if !self.led_init {
-            self.handler.pin_mode(25, types::PinMode::Output)?;
-            self.handler.pin_mode(26, types::PinMode::Output)?;
-            self.handler.pin_mode(27, types::PinMode::Output)?;
+            self.handle.pin_mode(25, types::PinMode::Output).await?;
+            self.handle.pin_mode(26, types::PinMode::Output).await?;
+            self.handle.pin_mode(27, types::PinMode::Output).await?;
             self.led_init = true;
         }
 
-        self.handler.analog_write(25, r)?;
-        self.handler.analog_write(26, g)?;
-        self.handler.analog_write(27, b)?;
+        self.handle.analog_write(25, r).await?;
+        self.handle.analog_write(26, g).await?;
+        self.handle.analog_write(27, b).await?;
 
         Ok(())
     }
 
-    pub fn configure(
+    pub async fn configure<DELAY: DelayUs>(
         &mut self,
-        config: types::Config,
-        connect_timeout: Option<time::Duration>,
+        config: types::Config<'_>,
+        delay: DELAY,
+        connect_timeout: Option<(u32, u32)>,
     ) -> Result<(), error::Error<T::Error>> {
         match config {
             types::Config::Station(station_config) => match station_config.network {
-                types::NetworkConfig::Open { ssid } => self.handler.set_network(ssid)?,
+                types::NetworkConfig::Open { ssid } => self.handle.set_network(ssid).await?,
                 types::NetworkConfig::Password { ssid, password } => {
-                    self.handler.set_passphrase(ssid, password)?
+                    self.handle.set_passphrase(ssid, password).await?
                 }
             },
             types::Config::AccessPoint(_) => unimplemented!(),
         }
 
-        if let Some(connect_timeout) = connect_timeout {
-            self.await_connection_state(types::ConnectionState::Connected, connect_timeout)?;
+        if let Some((timeout, interval)) = connect_timeout {
+            self.await_connection_state(
+                types::ConnectionState::Connected,
+                delay,
+                timeout,
+                interval,
+            )
+            .await?;
         }
 
         Ok(())
     }
 
-    pub fn await_connection_state(
+    pub async fn await_connection_state<DELAY: DelayUs>(
         &mut self,
         connection_state: types::ConnectionState,
-        timeout: time::Duration,
+        mut delay: DELAY,
+        timeout: u32,
+        interval: u32,
     ) -> Result<(), error::Error<T::Error>> {
-        const POLL_INTEVAL: time::Duration = time::Duration::from_millis(100);
-
-        let mut total_time = time::Duration::new(0, 0);
+        let mut total_time = 0;
 
         let mut actual_connection_state;
         loop {
-            actual_connection_state = self.handler.get_connection_state()?;
+            actual_connection_state = self.handle.get_connection_state().await?;
             if connection_state == actual_connection_state {
                 return Ok(());
             }
 
-            self.handler.delay(POLL_INTEVAL)?;
-            // TODO: don't assume the actual SPI transfer takes 0 time :)
-            total_time += POLL_INTEVAL;
+            delay.delay_ms(interval).await;
+            total_time += interval;
 
             if total_time > timeout {
                 break;
             }
         }
 
-        Err(error::Error::ConnectionFailure(actual_connection_state))
+        Err(error::TcpError::ConnectionFailure(actual_connection_state).into())
     }
 
-    pub fn scan_networks<'a>(
-        &'a mut self,
-    ) -> Result<
-        impl Iterator<Item = Result<types::ScannedNetwork, error::Error<T::Error>>> + 'a,
-        error::Error<T::Error>,
-    > {
-        self.handler.start_scan_networks()?;
-        Ok(self
-            .handler
-            .get_scanned_networks()?
-            .into_iter()
-            .enumerate()
-            .map(move |(i, ssid)| {
-                let i = i as u8;
-                let rssi = self.handler.get_scanned_network_rssi(i)?;
-                let encryption_type = self.handler.get_scanned_network_encryption_type(i)?;
-                let bssid = self.handler.get_scanned_network_bssid(i)?;
-                let channel = self.handler.get_scanned_network_channel(i)?;
-
-                Ok(types::ScannedNetwork {
-                    ssid,
-                    rssi,
-                    encryption_type,
-                    bssid,
-                    channel,
-                })
-            }))
-    }
-
-    pub fn ssid(&mut self) -> Result<arrayvec::ArrayVec<[u8; 32]>, error::Error<T::Error>> {
-        self.handler.get_current_ssid()
-    }
-
-    pub fn bssid(&mut self) -> Result<arrayvec::ArrayVec<[u8; 6]>, error::Error<T::Error>> {
-        self.handler.get_current_bssid()
-    }
-
-    pub fn rssi(&mut self) -> Result<i32, error::Error<T::Error>> {
-        self.handler.get_current_rssi()
-    }
-
-    pub fn encryption_type(&mut self) -> Result<types::EncryptionType, error::Error<T::Error>> {
-        self.handler.get_current_encryption_type()
-    }
-
-    pub fn resolve(
+    pub async fn scan_networks(
         &mut self,
-        hostname: &str,
-    ) -> Result<no_std_net::Ipv4Addr, error::Error<T::Error>> {
-        self.handler.request_host_by_name(hostname)?;
-        self.handler.get_host_by_name()
+    ) -> Result<Vec<types::ScannedNetwork, 32>, error::Error<T::Error>> {
+        self.handle.start_scan_networks().await?;
+
+        let networks = self.handle.get_scanned_networks().await?;
+        let mut network_info = Vec::new();
+
+        for (i, ssid) in networks.into_iter().enumerate() {
+            let i = i as u8;
+            let rssi = self.handle.get_scanned_network_rssi(i).await?;
+            let encryption_type = self.handle.get_scanned_network_encryption_type(i).await?;
+            let bssid = self.handle.get_scanned_network_bssid(i).await?;
+            let channel = self.handle.get_scanned_network_channel(i).await?;
+
+            // This push cannot fail since we are iterating over at most 32 networks
+            let _ = network_info.push(types::ScannedNetwork {
+                ssid,
+                rssi,
+                encryption_type,
+                bssid,
+                channel,
+            });
+        }
+
+        Ok(network_info)
     }
 
-    pub fn new_client(&mut self) -> Result<Client<T>, error::Error<T::Error>> {
-        let socket = self.handler.get_socket()?;
-        let buffer_offset = 0;
-        let buffer = arrayvec::ArrayVec::new();
-        let phantom = marker::PhantomData;
-        Ok(Client {
-            socket,
-            buffer_offset,
-            buffer,
-            phantom,
-        })
+    pub async fn ssid(&mut self) -> Result<heapless::Vec<u8, 32>, error::Error<T::Error>> {
+        self.handle.get_current_ssid().await
+    }
+
+    pub async fn bssid(&mut self) -> Result<heapless::Vec<u8, 6>, error::Error<T::Error>> {
+        self.handle.get_current_bssid().await
+    }
+
+    pub async fn rssi(&mut self) -> Result<i32, error::Error<T::Error>> {
+        self.handle.get_current_rssi().await
+    }
+
+    pub async fn encryption_type(
+        &mut self,
+    ) -> Result<types::EncryptionType, error::Error<T::Error>> {
+        self.handle.get_current_encryption_type().await
+    }
+
+    pub async fn resolve(&mut self, hostname: &str) -> Result<Ipv4Addr, error::Error<T::Error>> {
+        self.handle.request_host_by_name(hostname).await?;
+        self.handle.get_host_by_name().await
     }
 }
 
-impl<T> Client<T>
-where
-    T: transport::Transport,
+pub struct Socket<'a, const BUFFER_CAPACITY: usize, MutexType: RawMutex, T: Transport> {
+    handle: &'a WifiNinaHandle<MutexType, T>,
+    socket: InternalSocket,
+    cursor: usize,
+    buffer: [u8; BUFFER_CAPACITY],
+}
+
+impl<'a, const BUFFER_CAPACITY: usize, MutexType: RawMutex, T: Transport>
+    Socket<'a, BUFFER_CAPACITY, MutexType, T>
 {
-    pub fn connect_ipv4(
-        &mut self,
-        wifi: &mut Wifi<T>,
-        ip: no_std_net::Ipv4Addr,
-        port: u16,
-        protocol_mode: types::ProtocolMode,
-    ) -> Result<(), error::Error<T::Error>> {
-        wifi.handler
-            .start_client_by_ip(ip, port, self.socket, protocol_mode)
+    pub async fn state(&self) -> Result<types::TcpState, error::Error<T::Error>> {
+        self.handle.get_client_state(self.socket).await
     }
+}
 
-    pub fn send(
-        &mut self,
-        wifi: &mut Wifi<T>,
-        data: &[u8],
-    ) -> Result<usize, error::Error<T::Error>> {
-        let len = data.len().min(u16::max_value() as usize);
-        let sent = wifi.handler.send_data(self.socket, &data[..len])?;
-        wifi.handler.check_data_sent(self.socket)?;
-        Ok(sent)
+impl<'a, const BUFFER_CAPACITY: usize, MutexType: RawMutex, T: Transport> Io
+    for Socket<'a, BUFFER_CAPACITY, MutexType, T>
+{
+    type Error = error::Error<T::Error>;
+}
+
+impl<'a, const BUFFER_CAPACITY: usize, MutexType: RawMutex, T: Transport> Read
+    for Socket<'a, BUFFER_CAPACITY, MutexType, T>
+{
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        // TODO: check what this function returns. get_data_buf() might just return
+        // the length of the buffer---is that really how much data is recv'd?
+        self.handle.get_data_buf(self.socket, buf).await
     }
+}
 
-    pub fn send_all(
-        &mut self,
-        wifi: &mut Wifi<T>,
-        mut data: &[u8],
-    ) -> Result<(), error::Error<T::Error>> {
-        while !data.is_empty() {
-            let len = self.send(wifi, data)?;
-            data = &data[len..];
-        }
-        Ok(())
-    }
-
-    pub fn state(&mut self, wifi: &mut Wifi<T>) -> Result<types::TcpState, error::Error<T::Error>> {
-        wifi.handler.get_client_state(self.socket)
-    }
-
-    pub fn recv(
-        &mut self,
-        wifi: &mut Wifi<T>,
-        data: &mut [u8],
-    ) -> Result<usize, error::Error<T::Error>> {
-        if self.buffer_offset >= self.buffer.len() {
-            self.buffer.clear();
-            self.buffer
-                .try_extend_from_slice(&[0; BUFFER_CAPACITY])
-                .unwrap();
-            let recv_len = wifi
-                .handler
-                .get_data_buf(self.socket, self.buffer.as_mut())?;
-            self.buffer.truncate(recv_len);
-            self.buffer_offset = 0;
-            log::debug!("fetched new buffer of len {}", self.buffer.len());
+impl<'a, const BUFFER_CAPACITY: usize, MutexType: RawMutex, T: Transport> Write
+    for Socket<'a, BUFFER_CAPACITY, MutexType, T>
+{
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        /// Helper function to fill `buffer` from `other` as much as possible, updating `cursor`
+        fn fill_buffer(buffer: &mut [u8], cursor: &mut usize, other: &[u8]) -> usize {
+            // Figure out how much to copy, either the length of other or the remaining space in the buffer
+            let to_write = core::cmp::min(buffer.len() - *cursor, other.len());
+            // Copy from other to the buffer, update the cursor, and return how much written
+            buffer[*cursor..*cursor + to_write].copy_from_slice(&other[..to_write]);
+            *cursor += to_write;
+            to_write
         }
 
-        let len = data.len().min(self.buffer.len() - self.buffer_offset);
-        data[..len].copy_from_slice(&self.buffer[self.buffer_offset..self.buffer_offset + len]);
-        self.buffer_offset += len;
-        Ok(len)
+        assert!(self.cursor <= self.buffer.len());
+
+        // Write as much as possible right off the bat
+        let mut written = fill_buffer(&mut self.buffer, &mut self.cursor, buf);
+
+        // Loop while the entire other buffer isn't written to the internal buffer
+        while written < buf.len() {
+            // If it isn't, that means the internal buffer is full; flush it
+            self.flush().await?;
+            // Then write as much as possible again
+            written += fill_buffer(&mut self.buffer, &mut self.cursor, &buf[written..]);
+        }
+
+        Ok(written)
     }
 
-    pub fn recv_exact(
-        &mut self,
-        wifi: &mut Wifi<T>,
-        mut data: &mut [u8],
-    ) -> Result<(), error::Error<T::Error>> {
-        while !data.is_empty() {
-            let len = self.recv(wifi, data)?;
-            data = &mut data[len..];
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        // How far we are through the buffer
+        let mut flush_cursor = 0;
+
+        // Loop until everything is sent
+        while flush_cursor < self.cursor {
+            // Calculate how much to send in this tranche
+            let to_send = core::cmp::min(self.cursor - flush_cursor, u16::MAX as usize);
+            // Send to the WifiNina, which will send it
+            let sent = self
+                .handle
+                .send_data(
+                    self.socket,
+                    &self.buffer[flush_cursor..flush_cursor + to_send],
+                )
+                .await?;
+            // Make sure it sent
+            self.handle.check_data_sent(self.socket).await?;
+            // Increase the cursor and move to the next chunk
+            flush_cursor += sent;
         }
+
+        // Reset cursor
+        self.cursor = 0;
+
         Ok(())
     }
 }

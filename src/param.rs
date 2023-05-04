@@ -1,47 +1,58 @@
-use super::full_duplex::FullDuplexExt as _;
-use crate::encoding;
+use heapless::Vec;
+
 use core::marker;
 
-pub trait SendParam {
+use crate::{encoding, transport::Transporter};
+
+/// A parameter for a WifiNina command
+pub trait SerializeParam {
+    /// Return the length, in bytes, of sending the parameter
     fn len(&self) -> usize;
 
+    /// Return the length, in bytes, of sending the parameter if length-delimited
     fn len_length_delimited(&self, long: bool) -> usize {
         self.len() + if long { 2 } else { 1 }
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>;
+    /// Serialize the parameter into the provided `Transporter`
+    async fn serialize<T: Transporter>(&self, trans: &mut T) -> Result<(), T::Error>;
 
-    fn send_length_delimited<S>(&self, spi: &mut S, long: bool) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        encoding::send_len(spi, long, self.len())?;
-        self.send(spi)
+    /// Serialize the parameter into the provided `Transporter with its length first
+    async fn serialize_length_delimited<T: Transporter>(
+        &self,
+        trans: &mut T,
+        long: bool,
+    ) -> Result<(), T::Error> {
+        let len = self.len();
+        encoding::serialize_len(trans, long, len).await?;
+        self.serialize(trans).await
     }
 }
 
-pub trait RecvParam {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>;
+/// A parameters that can be received from the WifiNina
+pub trait ParseParam {
+    /// Parse the parameter from a `Transporter` given a length
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, len: usize) -> Result<(), T::Error>;
 
-    fn recv_length_delimited<S>(&mut self, spi: &mut S, long: bool) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        let len = encoding::recv_len(spi, long)?;
-        self.recv(spi, len)
+    /// Parse the parameter from a `Transporter` without knowing its length
+    async fn parse_length_delimited<T: Transporter>(
+        &mut self,
+        trans: &mut T,
+        long: bool,
+    ) -> Result<(), T::Error> {
+        let len = encoding::parse_len(trans, long).await?;
+        self.parse(trans, len).await
     }
 }
 
+/// A wrapper type to null-terminate any parameter
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct NullTerminated<A>(A)
 where
     A: ?Sized;
 
+/// A scalar value with a certain endian-ness and length
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar<O, A>
@@ -52,60 +63,48 @@ where
     value: A,
 }
 
-impl<A> SendParam for &A
+impl<A> SerializeParam for &A
 where
-    A: SendParam + ?Sized,
+    A: SerializeParam + ?Sized,
 {
     fn len(&self) -> usize {
         (*self).len()
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        (*self).send(spi)
+    async fn serialize<T: Transporter>(&self, trans: &mut T) -> Result<(), T::Error> {
+        (*self).serialize(trans).await
     }
 }
 
-impl<A> RecvParam for &mut A
+impl<A> ParseParam for &mut A
 where
-    A: RecvParam + ?Sized,
+    A: ParseParam + ?Sized,
 {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        (*self).recv(spi, len)
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, len: usize) -> Result<(), T::Error> {
+        (*self).parse(trans, len).await
     }
 }
 
-impl SendParam for u8 {
+impl SerializeParam for u8 {
     fn len(&self) -> usize {
         1
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        spi.send_exchange(*self)?;
-        Ok(())
+    async fn serialize<T: Transporter>(&self, trans: &mut T) -> Result<(), T::Error> {
+        trans.write(*self).await
     }
 }
 
-impl RecvParam for u8 {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
+impl ParseParam for u8 {
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, len: usize) -> Result<(), T::Error> {
         assert_eq!(1, len);
-        *self = spi.recv_exchange()?;
+
+        *self = trans.read().await?;
         Ok(())
     }
 }
 
-impl<O> SendParam for Scalar<O, u16>
+impl<O> SerializeParam for Scalar<O, u16>
 where
     O: byteorder::ByteOrder,
 {
@@ -113,36 +112,28 @@ where
         2
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        let mut buf = [0; 2];
+    async fn serialize<T: Transporter>(&self, trans: &mut T) -> Result<(), T::Error> {
+        let mut buf = [0_u8; 2];
         O::write_u16(&mut buf, self.value);
-        spi.send_exchange(buf[0])?;
-        spi.send_exchange(buf[1])?;
-        Ok(())
+        trans.write_from(&buf).await
     }
 }
 
-impl<O> RecvParam for Scalar<O, u16>
+impl<O> ParseParam for Scalar<O, u16>
 where
     O: byteorder::ByteOrder,
 {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, len: usize) -> Result<(), T::Error> {
         assert_eq!(2, len);
+
         let mut buf = [0; 2];
-        buf[0] = spi.recv_exchange()?;
-        buf[1] = spi.recv_exchange()?;
+        trans.read_into(&mut buf).await?;
         self.value = O::read_u16(&buf);
         Ok(())
     }
 }
 
-impl<O> SendParam for Scalar<O, u32>
+impl<O> SerializeParam for Scalar<O, u32>
 where
     O: byteorder::ByteOrder,
 {
@@ -150,134 +141,87 @@ where
         4
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        let mut buf = [0; 4];
+    async fn serialize<T: Transporter>(&self, trans: &mut T) -> Result<(), T::Error> {
+        let mut buf = [0_u8; 4];
         O::write_u32(&mut buf, self.value);
-        spi.send_exchange(buf[0])?;
-        spi.send_exchange(buf[1])?;
-        spi.send_exchange(buf[2])?;
-        spi.send_exchange(buf[3])?;
-        Ok(())
+        trans.write_from(&buf).await
     }
 }
 
-impl<O> RecvParam for Scalar<O, u32>
+impl<O> ParseParam for Scalar<O, u32>
 where
     O: byteorder::ByteOrder,
 {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, len: usize) -> Result<(), T::Error> {
         assert_eq!(4, len);
+
         let mut buf = [0; 4];
-        buf[0] = spi.recv_exchange()?;
-        buf[1] = spi.recv_exchange()?;
-        buf[2] = spi.recv_exchange()?;
-        buf[3] = spi.recv_exchange()?;
+        trans.read_into(&mut buf).await?;
         self.value = O::read_u32(&buf);
         Ok(())
     }
 }
 
-impl SendParam for [u8] {
+impl SerializeParam for [u8] {
     fn len(&self) -> usize {
         self.len()
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        for &byte in self.iter() {
-            spi.send_exchange(byte)?;
-        }
-
-        Ok(())
+    async fn serialize<T: Transporter>(&self, trans: &mut T) -> Result<(), T::Error> {
+        trans.write_from(self).await
     }
 }
 
-impl<A> SendParam for arrayvec::ArrayVec<A>
-where
-    A: arrayvec::Array<Item = u8>,
-{
+impl<const CAP: usize> SerializeParam for Vec<u8, CAP> {
     fn len(&self) -> usize {
-        self.len()
+        self.as_slice().len()
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        SendParam::send(self.as_slice(), spi)
+    async fn serialize<T: Transporter>(&self, trans: &mut T) -> Result<(), T::Error> {
+        self.as_slice().serialize(trans).await
     }
 }
 
-impl RecvParam for &mut [u8] {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        use core::mem;
+impl ParseParam for &mut [u8] {
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, len: usize) -> Result<(), T::Error> {
+        assert!(len <= self.len());
 
-        for i in 0..len {
-            self[i] = spi.recv_exchange()?;
-        }
-
-        let slice = mem::replace(self, &mut []);
-        *self = &mut slice[..len as usize];
-
+        trans.read_into(&mut self[..len]).await?;
         Ok(())
     }
 }
 
-impl<A> RecvParam for arrayvec::ArrayVec<A>
-where
-    A: arrayvec::Array<Item = u8>,
-{
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        for _ in 0..len {
-            self.push(spi.recv_exchange()?);
+impl<const CAP: usize> ParseParam for Vec<u8, CAP> {
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, len: usize) -> Result<(), T::Error> {
+        if self.len() < len {
+            // make space in the vector
+            self.extend(core::iter::repeat(0).take(len - self.len()));
         }
-
-        Ok(())
+        core::ops::DerefMut::deref_mut(self).parse(trans, len).await // fill it up
     }
 }
 
-impl<A> SendParam for NullTerminated<A>
+impl<A> SerializeParam for NullTerminated<A>
 where
-    A: SendParam,
+    A: SerializeParam,
 {
     fn len(&self) -> usize {
         self.0.len() + 1
     }
 
-    fn send<S>(&self, spi: &mut S) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        self.0.send(spi)?;
-        spi.send_exchange(0)?;
-        Ok(())
+    async fn serialize<T: Transporter>(&self, trans: &mut T) -> Result<(), T::Error> {
+        self.0.serialize(trans).await?;
+        trans.write(0).await
     }
 }
 
-impl<A> RecvParam for NullTerminated<A>
+impl<A> ParseParam for NullTerminated<A>
 where
-    A: RecvParam,
+    A: ParseParam,
 {
-    fn recv<S>(&mut self, spi: &mut S, len: usize) -> Result<(), S::Error>
-    where
-        S: embedded_hal::spi::FullDuplex<u8>,
-    {
-        self.0.recv(spi, len - 1)?;
-        assert_eq!(0, spi.recv_exchange()?);
+    async fn parse<T: Transporter>(&mut self, trans: &mut T, len: usize) -> Result<(), T::Error> {
+        self.0.parse(trans, len - 1).await?;
+        assert_eq!(trans.read().await?, 0);
         Ok(())
     }
 }
@@ -337,5 +281,181 @@ impl<O, A> core::ops::Deref for Scalar<O, A> {
 impl<O, A> core::ops::DerefMut for Scalar<O, A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.value
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::util::test::{async_test, MockTransporter};
+
+    proptest! {
+        #[test]
+        fn serialize_and_parse_u8(byte: u8) {
+            async_test! {
+                let mut trans: MockTransporter<2> = MockTransporter::new();
+
+                byte.serialize(&mut trans).await?;
+
+                prop_assert_eq!(trans.buffer[0], byte);
+
+                trans.to_reader();
+
+                let mut parsed = 0_u8;
+                parsed.parse(&mut trans, 1).await?;
+
+                prop_assert_eq!(parsed, byte);
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn serialize_and_parse_u8_with_length(byte: u8) {
+            async_test! {
+                let mut trans: MockTransporter<2> = MockTransporter::new();
+
+                byte.serialize_length_delimited(&mut trans, false).await?;
+
+                prop_assert_eq!(trans.buffer[0], 1);
+                prop_assert_eq!(trans.buffer[1], byte);
+
+                trans.to_reader();
+
+                let mut parsed = 0_u8;
+                parsed.parse_length_delimited(&mut trans, false).await?;
+
+                prop_assert_eq!(parsed, byte);
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn serialize_and_parse_bytes_with_length(ref bytes in proptest::collection::vec(any::<u8>(), 0..=127)) {
+            async_test! {
+                let mut trans: MockTransporter<128> = MockTransporter::new();
+
+                bytes.as_slice().serialize_length_delimited(&mut trans, false).await?;
+
+                prop_assert_eq!(trans.buffer[0] as usize, bytes.len());
+
+                trans.to_reader();
+
+                let mut parsed = Vec::<u8, 127>::new();
+                parsed.parse_length_delimited(&mut trans, false).await?;
+
+                prop_assert_eq!(parsed.as_slice(), bytes.as_slice());
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn serialize_and_parse_vec_with_length(ref bytes in proptest::collection::vec(any::<u8>(), 0..=127)) {
+            async_test! {
+                let mut trans: MockTransporter<128> = MockTransporter::new();
+
+                let mut vec = Vec::<u8, 127>::new();
+                vec.extend_from_slice(bytes.as_slice()).unwrap();
+                vec.serialize_length_delimited(&mut trans, false).await.unwrap();
+
+                prop_assert_eq!(trans.buffer[0] as usize, bytes.len());
+
+                trans.to_reader();
+
+                let mut parsed = Vec::<u8, 127>::new();
+                parsed.parse_length_delimited(&mut trans, false).await.unwrap();
+
+                prop_assert_eq!(parsed.as_slice(), vec.as_slice());
+                Ok(())
+            }
+
+
+        }
+
+        #[test]
+        fn serialize_and_parse_nullterminated_with_length(ref bytes in proptest::collection::vec(any::<u8>(), 0..=8)) {
+            async_test! {
+                let mut trans: MockTransporter<10> = MockTransporter::new();
+
+                let mut vec = Vec::<u8, 8>::new();
+                vec.extend_from_slice(bytes.as_slice()).unwrap();
+                let null_terminated = NullTerminated(vec);
+
+                null_terminated.serialize_length_delimited(&mut trans, false).await?;
+
+                prop_assert_eq!(trans.buffer[0] as usize, bytes.len() + 1);
+                prop_assert_eq!(trans.buffer[9], 0);
+
+                trans.to_reader();
+
+                let mut parsed = NullTerminated(Vec::<u8, 8>::new());
+                parsed.parse_length_delimited(&mut trans, false).await?;
+
+                prop_assert_eq!(parsed.as_slice(), null_terminated.as_slice());
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn serialize_and_parse_scalar_u16(scalar: u16) {
+            async_test! {
+                let mut trans: MockTransporter<2> = MockTransporter::new();
+
+                let be = Scalar::be(scalar);
+                be.serialize(&mut trans).await?;
+
+                trans.to_reader();
+
+                let mut parsed = Scalar::be(0);
+                parsed.parse(&mut trans, 2).await?;
+
+                prop_assert_eq!(*parsed, scalar);
+
+                trans.clear();
+
+                let le = Scalar::le(scalar);
+                le.serialize(&mut trans).await?;
+
+                trans.to_reader();
+
+                let mut parsed = Scalar::le(0);
+                parsed.parse(&mut trans, 2).await?;
+
+                prop_assert_eq!(*parsed, scalar);
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn serialize_and_parse_scalar_u32(scalar: u32) {
+            async_test! {
+                let mut trans: MockTransporter<4> = MockTransporter::new();
+
+                let be = Scalar::be(scalar);
+                be.serialize(&mut trans).await?;
+
+                trans.to_reader();
+
+                let mut parsed = Scalar::be(0);
+                parsed.parse(&mut trans, 4).await?;
+
+                prop_assert_eq!(*parsed, scalar);
+
+                trans.clear();
+
+                let le = Scalar::le(scalar);
+                le.serialize(&mut trans).await?;
+
+                trans.to_reader();
+
+                let mut parsed = Scalar::le(0);
+                parsed.parse(&mut trans, 4).await?;
+
+                prop_assert_eq!(*parsed, scalar);
+                Ok(())
+            }
+
+        }
     }
 }

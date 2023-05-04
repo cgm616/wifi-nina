@@ -1,83 +1,84 @@
 #![allow(dead_code)]
 
-use crate::command;
-use crate::error;
-use crate::param;
-use crate::params;
-use crate::transport;
-use crate::types;
-use core::fmt;
-use core::time;
+use futures_intrusive::sync::GenericMutex;
+use heapless::Vec;
+use lock_api::RawMutex;
 
+use core::fmt;
+
+use crate::{
+    command, error, param, params,
+    transport::Transport,
+    types::{self, InternalSocket, IpAddr, Ipv4Addr, ProtocolMode, SocketAddr},
+};
+
+/// A handler that knows how to interface with the `wifi-nina` firmware on the
+/// coprocessor given a connection to that coprocessor.
 #[derive(Debug)]
-pub struct Handler<T> {
-    transport: T,
+pub struct WifiNinaHandle<MutexType: RawMutex, T: Transport> {
+    transport: GenericMutex<MutexType, T>,
 }
 
-impl<T> Handler<T>
-where
-    T: transport::Transport,
-{
+impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
+    /// Construct a new [`Handler`] from an underlying [`Transport`].
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self {
+            transport: GenericMutex::new(transport, false),
+        }
     }
 
-    pub fn get_connection_state(
-        &mut self,
+    pub async fn get_connection_state(
+        &self,
     ) -> Result<types::ConnectionState, error::Error<T::Error>> {
-        use core::convert::TryFrom;
-
         let mut recv_params = (0u8,);
 
-        self.handle_cmd(command::Command::GetConnStatusCmd, &(), &mut recv_params)?;
+        self.handle_cmd(command::Command::GetConnStatusCmd, &(), &mut recv_params)
+            .await?;
 
         let (status,) = recv_params;
-        let status =
-            types::ConnectionState::try_from(status).map_err(error::Error::BadConnectionStatus)?;
+        let status = types::ConnectionState::try_from(status)
+            .map_err(error::TcpError::BadConnectionStatus)?;
 
         Ok(status)
     }
 
-    pub fn delay(&mut self, duration: time::Duration) -> Result<(), error::Error<T::Error>> {
-        self.transport
-            .delay(duration)
-            .map_err(error::Error::Transport)
-    }
-
-    pub fn get_firmware_version(
-        &mut self,
-    ) -> Result<arrayvec::ArrayVec<[u8; 16]>, error::Error<T::Error>> {
+    pub async fn get_firmware_version(
+        &self,
+    ) -> Result<heapless::Vec<u8, 16>, error::Error<T::Error>> {
         let send_params = (0u8,);
-        let mut recv_params = (param::NullTerminated::new(arrayvec::ArrayVec::new()),);
+        let mut recv_params = (param::NullTerminated::new(heapless::Vec::new()),);
 
         self.handle_cmd(
             command::Command::GetFwVersionCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let result = recv_params.0.into_inner();
 
         Ok(result)
     }
 
-    pub fn get_mac_address(&mut self) -> Result<[u8; 6], error::Error<T::Error>> {
+    pub async fn get_mac_address(&self) -> Result<[u8; 6], error::Error<T::Error>> {
         let send_params = (0u8,);
-        let mut recv_params = (arrayvec::ArrayVec::new(),);
+        let mut recv_params: (Vec<u8, 6>,) = (Vec::new(),);
 
         self.handle_cmd(
             command::Command::GetMacaddrCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
-        Ok(recv_params.0.into_inner().unwrap())
+        Ok(recv_params.0.into_array().unwrap())
     }
 
-    pub fn start_scan_networks(&mut self) -> Result<(), error::Error<T::Error>> {
+    pub async fn start_scan_networks(&self) -> Result<(), error::Error<T::Error>> {
         let mut recv_params = (0u8,);
 
-        self.handle_cmd(command::Command::StartScanNetworks, &(), &mut recv_params)?;
+        self.handle_cmd(command::Command::StartScanNetworks, &(), &mut recv_params)
+            .await?;
 
         let (status,) = recv_params;
 
@@ -88,19 +89,21 @@ where
         }
     }
 
-    pub fn get_scanned_networks(
-        &mut self,
-    ) -> Result<arrayvec::ArrayVec<[arrayvec::ArrayVec<[u8; 32]>; 16]>, error::Error<T::Error>>
-    {
-        let mut recv_params: arrayvec::ArrayVec<[arrayvec::ArrayVec<[u8; 32]>; 16]> =
-            arrayvec::ArrayVec::new();
+    pub async fn get_scanned_networks(
+        &self,
+    ) -> Result<heapless::Vec<heapless::Vec<u8, 32>, 16>, error::Error<T::Error>> {
+        let mut recv_params: heapless::Vec<heapless::Vec<u8, 32>, 16> = heapless::Vec::new();
 
-        self.handle_cmd(command::Command::ScanNetworks, &(), &mut recv_params)?;
+        self.handle_cmd(command::Command::ScanNetworks, &(), &mut recv_params)
+            .await?;
 
         Ok(recv_params)
     }
 
-    pub fn get_scanned_network_rssi(&mut self, network: u8) -> Result<i32, error::Error<T::Error>> {
+    pub async fn get_scanned_network_rssi(
+        &self,
+        network: u8,
+    ) -> Result<i32, error::Error<T::Error>> {
         let send_params = (network,);
         let mut recv_params = (param::Scalar::le(0u32),);
 
@@ -108,19 +111,18 @@ where
             command::Command::GetIdxRssiCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (rssi,) = recv_params;
 
         Ok(rssi.into_inner() as i32)
     }
 
-    pub fn get_scanned_network_encryption_type(
-        &mut self,
+    pub async fn get_scanned_network_encryption_type(
+        &self,
         network: u8,
     ) -> Result<types::EncryptionType, error::Error<T::Error>> {
-        use core::convert::TryFrom;
-
         let send_params = (network,);
         let mut recv_params = (0u8,);
 
@@ -128,36 +130,38 @@ where
             command::Command::GetIdxEnctCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (encryption_type,) = recv_params;
 
         let encryption_type = types::EncryptionType::try_from(encryption_type)
-            .map_err(error::Error::BadEncryptionType)?;
+            .map_err(error::TcpError::BadEncryptionType)?;
 
         Ok(encryption_type)
     }
 
-    pub fn get_scanned_network_bssid(
-        &mut self,
+    pub async fn get_scanned_network_bssid(
+        &self,
         network: u8,
     ) -> Result<[u8; 6], error::Error<T::Error>> {
         let send_params = (network,);
-        let mut recv_params = (arrayvec::ArrayVec::new(),);
+        let mut recv_params: (Vec<u8, 6>,) = (Vec::new(),);
 
         self.handle_cmd(
             command::Command::GetIdxBssid,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (bssid,) = recv_params;
 
-        Ok(bssid.into_inner().unwrap())
+        Ok(bssid.into_array().unwrap())
     }
 
-    pub fn get_scanned_network_channel(
-        &mut self,
+    pub async fn get_scanned_network_channel(
+        &self,
         network: u8,
     ) -> Result<u8, error::Error<T::Error>> {
         let send_params = (network,);
@@ -167,14 +171,15 @@ where
             command::Command::GetIdxChannelCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (channel,) = recv_params;
 
         Ok(channel)
     }
 
-    pub fn request_host_by_name(&mut self, hostname: &str) -> Result<(), error::Error<T::Error>> {
+    pub async fn request_host_by_name(&self, hostname: &str) -> Result<(), error::Error<T::Error>> {
         let send_params = (param::NullTerminated::new(hostname.as_bytes()),);
         let mut recv_params = (0u8,);
 
@@ -182,7 +187,8 @@ where
             command::Command::ReqHostByNameCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -193,17 +199,18 @@ where
         }
     }
 
-    pub fn get_host_by_name(&mut self) -> Result<no_std_net::Ipv4Addr, error::Error<T::Error>> {
+    pub async fn get_host_by_name(&self) -> Result<Ipv4Addr, error::Error<T::Error>> {
         let mut recv_params = (param::Scalar::be(0u32),);
 
-        self.handle_cmd(command::Command::GetHostByNameCmd, &(), &mut recv_params)?;
+        self.handle_cmd(command::Command::GetHostByNameCmd, &(), &mut recv_params)
+            .await?;
 
         let (ip,) = recv_params;
 
         Ok(ip.into_inner().into())
     }
 
-    pub fn get_network_data(&mut self) -> Result<types::NetworkData, error::Error<T::Error>> {
+    pub async fn get_network_data(&self) -> Result<types::NetworkData, error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (
             param::Scalar::be(0u32),
@@ -215,7 +222,8 @@ where
             command::Command::GetIpaddrCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (ip, mask, gateway) = recv_params;
         let ip = ip.into_inner().into();
@@ -225,9 +233,9 @@ where
         Ok(types::NetworkData { ip, mask, gateway })
     }
 
-    pub fn get_remote_data(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn get_remote_data(
+        &self,
+        socket: InternalSocket,
     ) -> Result<types::RemoteData, error::Error<T::Error>> {
         let send_params = (socket.0,);
         let mut recv_params = (param::Scalar::be(0u32), param::Scalar::be(0u32));
@@ -236,7 +244,8 @@ where
             command::Command::GetRemoteDataCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (ip, port) = recv_params;
         let ip = ip.into_inner().into();
@@ -245,11 +254,12 @@ where
         Ok(types::RemoteData { ip, port })
     }
 
-    pub fn set_network(&mut self, ssid: &[u8]) -> Result<(), error::Error<T::Error>> {
+    pub async fn set_network(&self, ssid: &[u8]) -> Result<(), error::Error<T::Error>> {
         let send_params = (param::NullTerminated::new(ssid),);
         let mut recv_params = (0u8,);
 
-        self.handle_cmd(command::Command::SetNetCmd, &send_params, &mut recv_params)?;
+        self.handle_cmd(command::Command::SetNetCmd, &send_params, &mut recv_params)
+            .await?;
 
         let (status,) = recv_params;
 
@@ -260,8 +270,8 @@ where
         }
     }
 
-    pub fn set_passphrase(
-        &mut self,
+    pub async fn set_passphrase(
+        &self,
         ssid: &[u8],
         passphrase: &[u8],
     ) -> Result<(), error::Error<T::Error>> {
@@ -275,7 +285,8 @@ where
             command::Command::SetPassphraseCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -286,8 +297,8 @@ where
         }
     }
 
-    pub fn set_key(
-        &mut self,
+    pub async fn set_key(
+        &self,
         ssid: &str,
         key_idx: u8,
         key: &[u8],
@@ -300,7 +311,8 @@ where
         );
         let mut recv_params = (0u8,);
 
-        self.handle_cmd(command::Command::SetKeyCmd, &send_params, &mut recv_params)?;
+        self.handle_cmd(command::Command::SetKeyCmd, &send_params, &mut recv_params)
+            .await?;
 
         let (status,) = recv_params;
 
@@ -311,12 +323,12 @@ where
         }
     }
 
-    pub fn config(
-        &mut self,
+    pub async fn config(
+        &self,
         valid_params: u8,
-        local_ip: no_std_net::Ipv4Addr,
-        gateway: no_std_net::Ipv4Addr,
-        subnet: no_std_net::Ipv4Addr,
+        local_ip: Ipv4Addr,
+        gateway: Ipv4Addr,
+        subnet: Ipv4Addr,
     ) -> Result<(), error::Error<T::Error>> {
         let send_params = (
             valid_params,
@@ -330,7 +342,8 @@ where
             command::Command::SetIpConfigCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -341,11 +354,11 @@ where
         }
     }
 
-    pub fn set_dns(
-        &mut self,
+    pub async fn set_dns(
+        &self,
         valid_params: u8,
-        dns_server1: no_std_net::Ipv4Addr,
-        dns_server2: no_std_net::Ipv4Addr,
+        dns_server1: Ipv4Addr,
+        dns_server2: Ipv4Addr,
     ) -> Result<(), error::Error<T::Error>> {
         let send_params = (
             valid_params,
@@ -358,7 +371,8 @@ where
             command::Command::SetDnsConfigCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -369,7 +383,7 @@ where
         }
     }
 
-    pub fn set_hostname(&mut self, hostname: &str) -> Result<(), error::Error<T::Error>> {
+    pub async fn set_hostname(&self, hostname: &str) -> Result<(), error::Error<T::Error>> {
         let send_params = (param::NullTerminated::new(hostname.as_bytes()),);
         let mut recv_params = (0u8,);
 
@@ -377,7 +391,8 @@ where
             command::Command::SetHostnameCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -388,7 +403,7 @@ where
         }
     }
 
-    pub fn disconnect(&mut self) -> Result<(), error::Error<T::Error>> {
+    pub async fn disconnect(&self) -> Result<(), error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (0u8,);
 
@@ -396,7 +411,8 @@ where
             command::Command::DisconnectCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -407,39 +423,37 @@ where
         }
     }
 
-    pub fn get_current_ssid(
-        &mut self,
-    ) -> Result<arrayvec::ArrayVec<[u8; 32]>, error::Error<T::Error>> {
+    pub async fn get_current_ssid(&self) -> Result<heapless::Vec<u8, 32>, error::Error<T::Error>> {
         let send_params = (0u8,);
-        let mut recv_params = (arrayvec::ArrayVec::new(),);
+        let mut recv_params = (heapless::Vec::new(),);
 
         self.handle_cmd(
             command::Command::GetCurrSsidCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (ssid,) = recv_params;
 
         Ok(ssid)
     }
 
-    pub fn get_current_bssid(
-        &mut self,
-    ) -> Result<arrayvec::ArrayVec<[u8; 6]>, error::Error<T::Error>> {
+    pub async fn get_current_bssid(&self) -> Result<heapless::Vec<u8, 6>, error::Error<T::Error>> {
         let send_params = (0u8,);
-        let mut recv_params = (arrayvec::ArrayVec::new(),);
+        let mut recv_params = (heapless::Vec::new(),);
 
         self.handle_cmd(
             command::Command::GetCurrBssidCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         Ok(recv_params.0)
     }
 
-    pub fn get_current_rssi(&mut self) -> Result<i32, error::Error<T::Error>> {
+    pub async fn get_current_rssi(&self) -> Result<i32, error::Error<T::Error>> {
         let send_params = (0u8,);
         let mut recv_params = (param::Scalar::be(0u32),);
 
@@ -447,18 +461,17 @@ where
             command::Command::GetCurrRssiCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (rssi,) = recv_params;
 
         Ok(rssi.into_inner() as i32)
     }
 
-    pub fn get_current_encryption_type(
-        &mut self,
+    pub async fn get_current_encryption_type(
+        &self,
     ) -> Result<types::EncryptionType, error::Error<T::Error>> {
-        use core::convert::TryFrom;
-
         let send_params = (0u8,);
         let mut recv_params = (0u8,);
 
@@ -466,26 +479,31 @@ where
             command::Command::GetCurrEnctCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (encryption_type,) = recv_params;
 
         let encryption_type = types::EncryptionType::try_from(encryption_type)
-            .map_err(error::Error::BadEncryptionType)?;
+            .map_err(error::TcpError::BadEncryptionType)?;
 
         Ok(encryption_type)
     }
 
-    pub fn start_client_by_ip(
-        &mut self,
-        ip: no_std_net::Ipv4Addr,
-        port: u16,
-        socket: types::Socket,
-        protocol_mode: types::ProtocolMode,
+    pub(crate) async fn start_client_by_addr(
+        &self,
+        addr: SocketAddr,
+        socket: InternalSocket,
+        protocol_mode: ProtocolMode,
     ) -> Result<(), error::Error<T::Error>> {
+        let ipv4 = match addr.ip() {
+            IpAddr::V4(ip) => ip,
+            _ => return Err(error::Error::NotIpv4),
+        };
+
         let send_params = (
-            param::Scalar::be(u32::from(ip)),
-            param::Scalar::be(port),
+            param::Scalar::be(u32::from(ipv4)),
+            param::Scalar::be(addr.port()),
             socket.0,
             u8::from(protocol_mode),
         );
@@ -495,7 +513,8 @@ where
             command::Command::StartClientTcpCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -506,7 +525,10 @@ where
         }
     }
 
-    pub fn stop_client(&mut self, socket: types::Socket) -> Result<(), error::Error<T::Error>> {
+    pub(crate) async fn stop_client(
+        &self,
+        socket: InternalSocket,
+    ) -> Result<(), error::Error<T::Error>> {
         let send_params = (socket.0,);
         let mut recv_params = (0u8,);
 
@@ -514,7 +536,8 @@ where
             command::Command::StopClientTcpCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -525,12 +548,10 @@ where
         }
     }
 
-    pub fn get_client_state(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn get_client_state(
+        &self,
+        socket: InternalSocket,
     ) -> Result<types::TcpState, error::Error<T::Error>> {
-        use core::convert::TryFrom;
-
         let send_params = (socket.0,);
         let mut recv_params = (0u8,);
 
@@ -538,15 +559,19 @@ where
             command::Command::GetClientStateTcpCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (state,) = recv_params;
-        let state = types::TcpState::try_from(state).map_err(error::Error::BadTcpState)?;
+        let state = types::TcpState::try_from(state).map_err(error::TcpError::BadTcpState)?;
 
         Ok(state)
     }
 
-    pub fn avail_data(&mut self, socket: types::Socket) -> Result<u16, error::Error<T::Error>> {
+    pub(crate) async fn avail_data(
+        &self,
+        socket: InternalSocket,
+    ) -> Result<u16, error::Error<T::Error>> {
         let send_params = (socket.0,);
         let mut recv_params = (param::Scalar::le(0u16),);
 
@@ -554,19 +579,19 @@ where
             command::Command::AvailDataTcpCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (data,) = recv_params;
 
         Ok(data.into_inner())
     }
 
-    pub fn get_data_buf(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn get_data_buf(
+        &self,
+        socket: InternalSocket,
         buf: &mut [u8],
     ) -> Result<usize, error::Error<T::Error>> {
-        use core::convert::TryFrom;
         let send_params = (
             socket.0,
             param::Scalar::le(u16::try_from(buf.len()).unwrap()),
@@ -577,14 +602,15 @@ where
             command::Command::GetDatabufTcpCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         Ok(recv_params.0.len())
     }
 
-    pub fn send_data(
-        &mut self,
-        socket: types::Socket,
+    pub(crate) async fn send_data(
+        &self,
+        socket: InternalSocket,
         data: &[u8],
     ) -> Result<usize, error::Error<T::Error>> {
         let send_params = (socket.0, data);
@@ -594,14 +620,18 @@ where
             command::Command::SendDataTcpCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (len,) = recv_params;
 
         Ok(len.into_inner() as usize)
     }
 
-    pub fn check_data_sent(&mut self, socket: types::Socket) -> Result<(), error::Error<T::Error>> {
+    pub(crate) async fn check_data_sent(
+        &self,
+        socket: InternalSocket,
+    ) -> Result<(), error::Error<T::Error>> {
         let send_params = (socket.0,);
         let mut recv_params = (0u8,);
 
@@ -609,7 +639,8 @@ where
             command::Command::DataSentTcpCmd,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -620,26 +651,28 @@ where
         }
     }
 
-    pub fn get_socket(&mut self) -> Result<types::Socket, error::Error<T::Error>> {
+    pub(crate) async fn get_socket(&self) -> Result<InternalSocket, error::Error<T::Error>> {
         let mut recv_params = (0u8,);
 
-        self.handle_cmd(command::Command::GetSocketCmd, &(), &mut recv_params)?;
+        self.handle_cmd(command::Command::GetSocketCmd, &(), &mut recv_params)
+            .await?;
 
         let (socket,) = recv_params;
-        let socket = types::Socket(socket);
+        let socket = InternalSocket(socket);
 
         Ok(socket)
     }
 
-    pub fn pin_mode(
-        &mut self,
+    pub async fn pin_mode(
+        &self,
         pin: u8,
         mode: types::PinMode,
     ) -> Result<(), error::Error<T::Error>> {
         let send_params = (pin, u8::from(mode));
         let mut recv_params = (0u8,);
 
-        self.handle_cmd(command::Command::SetPinMode, &send_params, &mut recv_params)?;
+        self.handle_cmd(command::Command::SetPinMode, &send_params, &mut recv_params)
+            .await?;
 
         let (status,) = recv_params;
 
@@ -650,7 +683,7 @@ where
         }
     }
 
-    pub fn digital_write(&mut self, pin: u8, value: u8) -> Result<(), error::Error<T::Error>> {
+    pub async fn digital_write(&self, pin: u8, value: u8) -> Result<(), error::Error<T::Error>> {
         let send_params = (pin, value);
         let mut recv_params = (0u8,);
 
@@ -658,7 +691,8 @@ where
             command::Command::SetDigitalWrite,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -669,7 +703,7 @@ where
         }
     }
 
-    pub fn analog_write(&mut self, pin: u8, value: u8) -> Result<(), error::Error<T::Error>> {
+    pub async fn analog_write(&self, pin: u8, value: u8) -> Result<(), error::Error<T::Error>> {
         let send_params = (pin, value);
         let mut recv_params = (0u8,);
 
@@ -677,7 +711,8 @@ where
             command::Command::SetAnalogWrite,
             &send_params,
             &mut recv_params,
-        )?;
+        )
+        .await?;
 
         let (status,) = recv_params;
 
@@ -688,48 +723,57 @@ where
         }
     }
 
-    fn handle_cmd<SP, RP>(
-        &mut self,
+    async fn handle_cmd<SP, RP>(
+        &self,
         command: command::Command,
         send_params: &SP,
         recv_params: &mut RP,
     ) -> Result<(), error::Error<T::Error>>
     where
-        SP: params::SendParams + fmt::Debug,
-        RP: params::RecvParams + fmt::Debug,
+        SP: params::SerializeParams + fmt::Debug,
+        RP: params::ParseParams + fmt::Debug,
     {
         self.transport
+            .lock()
+            .await
             .handle_cmd(command, send_params, recv_params, false, false)
+            .await
             .map_err(error::Error::Transport)
     }
 
-    fn handle_long_send_cmd<SP, RP>(
-        &mut self,
+    async fn handle_long_send_cmd<SP, RP>(
+        &self,
         command: command::Command,
         send_params: &SP,
         recv_params: &mut RP,
     ) -> Result<(), error::Error<T::Error>>
     where
-        SP: params::SendParams + fmt::Debug,
-        RP: params::RecvParams + fmt::Debug,
+        SP: params::SerializeParams + fmt::Debug,
+        RP: params::ParseParams + fmt::Debug,
     {
         self.transport
+            .lock()
+            .await
             .handle_cmd(command, send_params, recv_params, true, false)
+            .await
             .map_err(error::Error::Transport)
     }
 
-    fn handle_long_send_long_recv_cmd<SP, RP>(
-        &mut self,
+    async fn handle_long_send_long_recv_cmd<SP, RP>(
+        &self,
         command: command::Command,
         send_params: &SP,
         recv_params: &mut RP,
     ) -> Result<(), error::Error<T::Error>>
     where
-        SP: params::SendParams + fmt::Debug,
-        RP: params::RecvParams + fmt::Debug,
+        SP: params::SerializeParams + fmt::Debug,
+        RP: params::ParseParams + fmt::Debug,
     {
         self.transport
+            .lock()
+            .await
             .handle_cmd(command, send_params, recv_params, true, true)
+            .await
             .map_err(error::Error::Transport)
     }
 }

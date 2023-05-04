@@ -1,4 +1,10 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
+//! Definitions of the commands that the `wifi-nina` firmware on
+//! the coprocessor accepts over SPI.
+
+/// A command that the `wifi-nina` firmware can take over SPI.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive,
+)]
 #[repr(u8)]
 pub enum Command {
     SetNetCmd = 0x10,

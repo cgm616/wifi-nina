@@ -1,4 +1,9 @@
-use core::fmt;
+use core::{
+    fmt,
+    ops::{Deref, DerefMut},
+};
+
+pub use embedded_nal_async::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Config<'a> {
@@ -25,18 +30,34 @@ pub struct AccessPointConfig<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Socket(pub(crate) u8);
+pub(crate) struct InternalSocket(pub u8);
+
+impl Deref for InternalSocket {
+    type Target = u8;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for InternalSocket {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScannedNetwork {
-    pub ssid: arrayvec::ArrayVec<[u8; 32]>,
+    pub ssid: heapless::Vec<u8, 32>,
     pub rssi: i32,
     pub encryption_type: EncryptionType,
     pub bssid: [u8; 6],
     pub channel: u8,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive,
+)]
 #[repr(u8)]
 pub enum PinMode {
     Input = 0,
@@ -44,7 +65,9 @@ pub enum PinMode {
     InputPullup = 2,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive,
+)]
 #[repr(u8)]
 pub enum ProtocolMode {
     Tcp = 0,
@@ -53,7 +76,9 @@ pub enum ProtocolMode {
     UdpMulticast = 3,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive,
+)]
 #[repr(u8)]
 pub enum ConnectionState {
     IdleStatus = 0,
@@ -68,7 +93,9 @@ pub enum ConnectionState {
     ApFailed = 9,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive,
+)]
 #[repr(u8)]
 pub enum TcpState {
     Closed = 0,
@@ -84,7 +111,9 @@ pub enum TcpState {
     TimeWait = 10,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive,
+)]
 #[repr(u8)]
 pub enum EncryptionType {
     Invalid = 0,
@@ -99,14 +128,14 @@ pub enum EncryptionType {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct NetworkData {
-    pub ip: no_std_net::Ipv4Addr,
-    pub mask: no_std_net::Ipv4Addr,
-    pub gateway: no_std_net::Ipv4Addr,
+    pub ip: Ipv4Addr,
+    pub mask: Ipv4Addr,
+    pub gateway: Ipv4Addr,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RemoteData {
-    pub ip: no_std_net::Ipv4Addr,
+    pub ip: Ipv4Addr,
     pub port: u32,
 }
 
