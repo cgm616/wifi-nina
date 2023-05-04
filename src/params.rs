@@ -106,8 +106,6 @@ where
     }
 
     async fn serialize<T: Transporter>(&self, trans: &mut T, long: bool) -> Result<(), T::Error> {
-        use core::convert::TryFrom;
-
         let len = u8::try_from(self.as_slice().len()).unwrap(); // TODO:: do we really want to unwrap?
         trans.write(len).await?;
         for item in self.iter() {

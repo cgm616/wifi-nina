@@ -2,7 +2,7 @@
 name = "wifi-nina"
 version = "0.1.4"
 authors = ["Cole Graber-Mitchell <cargo@cgm616.me>"]
-edition = "2018"
+edition = "2021"
 description = "An embedded driver for ublox NINA-W10-based WiFi boards (using ESP32), present on some Arduinos, or using the Adafruit AirLift series of chips"
 repository = "https://github.com/cgm616/wifi-nina/"
 license = "MIT"

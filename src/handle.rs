@@ -30,8 +30,6 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
     pub async fn get_connection_state(
         &self,
     ) -> Result<types::ConnectionState, error::Error<T::Error>> {
-        use core::convert::TryFrom;
-
         let mut recv_params = (0u8,);
 
         self.handle_cmd(command::Command::GetConnStatusCmd, &(), &mut recv_params)
@@ -125,8 +123,6 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
         &self,
         network: u8,
     ) -> Result<types::EncryptionType, error::Error<T::Error>> {
-        use core::convert::TryFrom;
-
         let send_params = (network,);
         let mut recv_params = (0u8,);
 
@@ -476,8 +472,6 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
     pub async fn get_current_encryption_type(
         &self,
     ) -> Result<types::EncryptionType, error::Error<T::Error>> {
-        use core::convert::TryFrom;
-
         let send_params = (0u8,);
         let mut recv_params = (0u8,);
 
@@ -558,8 +552,6 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
         &self,
         socket: InternalSocket,
     ) -> Result<types::TcpState, error::Error<T::Error>> {
-        use core::convert::TryFrom;
-
         let send_params = (socket.0,);
         let mut recv_params = (0u8,);
 
@@ -600,7 +592,6 @@ impl<MutexType: RawMutex, T: Transport> WifiNinaHandle<MutexType, T> {
         socket: InternalSocket,
         buf: &mut [u8],
     ) -> Result<usize, error::Error<T::Error>> {
-        use core::convert::TryFrom;
         let send_params = (
             socket.0,
             param::Scalar::le(u16::try_from(buf.len()).unwrap()),
